@@ -6,7 +6,10 @@ const axios = require("axios");
 // CONFIG
 // ==========================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-const RENDER_API = "https://html-renderer.dinhdungit.cloud/render";
+
+const HCTI_API = "https://hcti.io/v1/image";
+const HCTI_USER_ID = "01KA8CK32Z4FVS04W1VG2123EY"; // <-- THAY VÀO
+const HCTI_API_KEY = "019a90c9-8c5f-7fac-bde0-b36768136061"; // <-- THAY VÀO
 
 const PRINTER_IP = "192.168.1.110";
 const PRINTER_PORT = 9100;
@@ -37,20 +40,29 @@ async function setStatus(id, status) {
 }
 
 // ==========================
-// RENDER KHÔNG DÙNG PUPPETEER
+// RENDER HTML → PNG (MIỄN PHÍ)
 // ==========================
 async function renderHTMLtoPNG(html) {
-  console.log("🎨 Gửi HTML lên Cloud Render...");
+  console.log("🎨 Render qua htmlcsstoimage.com ...");
 
-  const res = await axios.post(RENDER_API, { html }, { timeout: 15000 });
+  const res = await axios.post(
+    HCTI_API,
+    { html, google_fonts: "Roboto" },
+    {
+      auth: {
+        username: HCTI_USER_ID,
+        password: HCTI_API_KEY,
+      },
+      timeout: 15000,
+    }
+  );
 
-  if (!res.data || !res.data.image) {
-    throw new Error("Render API không trả về image");
-  }
+  console.log("✔ Nhận link PNG:", res.data.url);
 
-  console.log("✔ Nhận PNG base64 từ server");
+  // tải ảnh về dưới dạng buffer
+  const imgRes = await axios.get(res.data.url, { responseType: "arraybuffer" });
 
-  return Buffer.from(res.data.image, "base64");
+  return Buffer.from(imgRes.data);
 }
 
 // ==========================
@@ -63,13 +75,12 @@ async function printHTML(html) {
 
   try {
     console.log("1️⃣ Render HTML → PNG");
-
     const pngBuffer = await renderHTMLtoPNG(html);
 
     await Jimp.read(pngBuffer).then((img) => img.writeAsync("label.png"));
-    console.log("✔ Đã lưu label.png");
+    console.log("✔ Lưu file label.png");
 
-    console.log("2️⃣ Load PNG + xử lý grayscale");
+    console.log("2️⃣ Load PNG + grayscale");
     const img = await Jimp.read("label.png");
 
     img
@@ -80,19 +91,16 @@ async function printHTML(html) {
 
     console.log("✔ Resize xong");
 
-    console.log("3️⃣ Canh giữa → tạo canvas");
-
+    console.log("3️⃣ Tạo canvas để canh giữa");
     const canvas = new Jimp(CANVAS_WIDTH, img.bitmap.height, 0xffffffff);
-
     const centerOffset = Math.floor((CANVAS_WIDTH - PRINT_WIDTH) / 2);
     const finalOffset = centerOffset + MACHINE_OFFSET;
 
     canvas.composite(img, finalOffset, 0);
     await canvas.writeAsync("debug_centered.png");
+    console.log("✔ debug_centered.png OK");
 
-    console.log("✔ Xuất debug_centered.png OK");
-
-    console.log("4️⃣ Convert sang bitmap mono...");
+    console.log("4️⃣ Convert → mono bitmap");
 
     const width = canvas.bitmap.width;
     const height = canvas.bitmap.height;
@@ -109,9 +117,10 @@ async function printHTML(html) {
       }
     }
 
-    console.log("✔ Convert bitmap xong");
+    console.log("✔ Convert bitmap OK");
 
-    console.log("5️⃣ Chuẩn bị TSPL command");
+    // ===================== TSPL
+    console.log("5️⃣ Chuẩn bị lệnh TSPL");
 
     let tspl = "";
     tspl += "SIZE 80 mm,80 mm\r\n";
@@ -121,6 +130,7 @@ async function printHTML(html) {
 
     const header = Buffer.from(tspl, "ascii");
     const footer = Buffer.from("\r\nPRINT 1\r\n", "ascii");
+
     const printCmd = Buffer.concat([header, bitmap, footer]);
 
     console.log("6️⃣ Gửi tới máy in...");
@@ -129,9 +139,9 @@ async function printHTML(html) {
       const client = new net.Socket();
 
       client.connect(PRINTER_PORT, PRINTER_IP, () => {
-        console.log("📡 Đã kết nối máy in");
+        console.log("📡 Kết nối máy in OK");
         client.write(printCmd, () => {
-          console.log("✅ In xong!");
+          console.log("✅ Đã gửi lệnh in");
           client.end();
           resolve();
         });
@@ -143,7 +153,7 @@ async function printHTML(html) {
       });
     });
   } catch (err) {
-    console.error("🔥 LỖI TRONG printHTML:", err);
+    console.error("🔥 LỖI printHTML:", err);
     throw err;
   }
 }
@@ -172,17 +182,16 @@ async function worker() {
 
   for (const item of queue) {
     console.log("\n==============================");
-    console.log("▶ Xử lý job", item.id);
+    console.log("▶ Xử lý job:", item.id);
     console.log("==============================");
 
     await setStatus(item.id, "printing");
 
     try {
       await printHTML(item.html);
-      console.log("🗑 Xóa job:", item.id);
       await deletePrinted(item.id);
     } catch (err) {
-      console.error("❌ In thất bại → trả về pending");
+      console.error("❌ In lỗi → trả về pending");
       await setStatus(item.id, "pending");
     }
   }
