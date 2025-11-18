@@ -1,261 +1,236 @@
-const nodeHtmlToImage = require("node-html-to-image");
 const Jimp = require("jimp");
-const fs = require("fs");
 const net = require("net");
 const axios = require("axios");
 
+// ==================== CONFIG ====================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/print.php";
+
 const PRINTER_IP = "192.168.1.110";
 const PRINTER_PORT = 9100;
 
-const CANVAS_WIDTH = 576;
-const PRINT_WIDTH = 560;
-const MACHINE_OFFSET = 12;
+const WIDTH = 576; // Khổ in 80mm chuẩn 203dpi
+const PADDING = 20;
 
-// ==========================
-//  HÀM API
-// ==========================
+// ==================== HELPERS ====================
+function price(num) {
+  return Number(num).toLocaleString("vi-VN");
+}
 
-// Helper function để delay
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function drawSeparator(img, y) {
+  img.scan(20, y, WIDTH - 40, 2, function (x, y2, idx) {
+    this.bitmap.data[idx] = 0; // black
+    this.bitmap.data[idx + 1] = 0;
+    this.bitmap.data[idx + 2] = 0;
+    this.bitmap.data[idx + 3] = 255; // opacity
+  });
+}
 
+function printLine(img, font, text, y) {
+  img.print(font, PADDING, y, text, WIDTH - PADDING * 2);
+  return y + 30; // line height
+}
+
+function printSectionTitle(img, font, text, y) {
+  img.print(
+    font,
+    0,
+    y,
+    { text, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  return y + 40;
+}
+
+// ==================== API QUEUE ====================
 async function getPrintQueue() {
-  try {
-    const res = await axios.post(API_URL, { action: "get_all" });
-    return res.data.data || [];
-  } catch (err) {
-    console.error("❌ Lỗi API getPrintQueue:", err.message);
-    return [];
-  }
+  const res = await axios.post(API_URL, { action: "get_all" });
+  return res.data.data || [];
 }
 
 async function deletePrinted(id) {
-  try {
-    await axios.post(API_URL, { action: "delete", id });
-  } catch (err) {
-    console.error("❌ Lỗi API deletePrinted:", err.message);
-  }
+  await axios.post(API_URL, { action: "delete", id });
 }
 
 async function setStatus(id, status) {
-  try {
-    await axios.post(API_URL, {
-      action: "set_status",
-      id,
-      status,
-    });
-  } catch (err) {
-    console.error("❌ Lỗi API setStatus:", err.message);
-  }
+  await axios.post(API_URL, { action: "set_status", id, status });
 }
 
-// ==========================
-//  RENDER HTML → PNG
-// ==========================
-async function printHTML(html) {
-  console.log("🔄 Render HTML...");
+// ==================== DRAW TEXT ====================
+async function drawReceipt(data) {
+  const fontTitle = await Jimp.loadFont(Jimp.FONT_SANS_32_BLACK);
+  const fontNormal = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
+  const fontBold = await Jimp.loadFont(Jimp.FONT_SANS_32_BLACK);
 
-  try {
-    // 1. Render HTML → PNG với node-html-to-image
-    await nodeHtmlToImage({
-      output: "./label.png",
-      html: html,
-      type: "png",
-      puppeteerArgs: {
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      },
-      beforeScreenshot: async (page) => {
-        // Set viewport ban đầu
-        await page.setViewport({
-          width: CANVAS_WIDTH,
-          height: 100,
-          deviceScaleFactor: 2,
-        });
+  let y = 20;
 
-        // Đợi tất cả fonts và styles load xong
-        await page.evaluateHandle("document.fonts.ready");
-        await sleep(500);
+  // Tạo canvas lớn trước
+  const img = new Jimp(WIDTH, 4000, 0xffffffff);
 
-        // Tính chiều cao thực tế (lấy max của các giá trị)
-        const dimensions = await page.evaluate(() => {
-          const body = document.body;
-          const html = document.documentElement;
+  // ===== TITLE =====
+  img.print(
+    fontTitle,
+    0,
+    y,
+    { text: "HÓA ĐƠN BÁN HÀNG", alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  y += 50;
 
-          return {
-            scrollHeight: Math.max(
-              body.scrollHeight,
-              body.offsetHeight,
-              html.clientHeight,
-              html.scrollHeight,
-              html.offsetHeight
-            ),
-            clientHeight: html.clientHeight,
-          };
-        });
+  img.print(
+    fontNormal,
+    0,
+    y,
+    { text: `#${data.order_id}`, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  y += 40;
 
-        // Thêm buffer 50px để chắc chắn
-        const finalHeight = dimensions.scrollHeight + 50;
+  drawSeparator(img, y);
+  y += 20;
 
-        console.log(`📏 Chiều cao tính được: ${dimensions.scrollHeight}px`);
-        console.log(`📏 Chiều cao cuối cùng: ${finalHeight}px`);
+  // ===== ORDER INFORMATION =====
+  y = printLine(img, fontNormal, `Chi nhánh: ${data.branch}`, y);
+  y = printLine(img, fontNormal, `Ngày: ${data.time}`, y);
+  y = printLine(img, fontNormal, `Trạng thái: ${data.status}`, y);
 
-        // Set lại viewport với chiều cao đúng
-        await page.setViewport({
-          width: CANVAS_WIDTH,
-          height: finalHeight,
-          deviceScaleFactor: 2,
-        });
+  drawSeparator(img, y);
+  y += 20;
 
-        // Đợi thêm một chút để render hoàn tất
-        await sleep(300);
-      },
-    });
+  // ===== CUSTOMER INFO =====
+  y = printSectionTitle(img, fontNormal, "Thông tin khách hàng", y);
+  y = printLine(img, fontNormal, `Tên: ${data.customer}`, y);
+  y = printLine(img, fontNormal, `SĐT: ${data.phone}`, y);
+  y = printLine(img, fontNormal, `Địa chỉ: ${data.address}`, y);
 
-    console.log("✅ Đã render HTML → PNG");
+  drawSeparator(img, y);
+  y += 20;
 
-    // 2. Xử lý ảnh với Jimp
-    let img = await Jimp.read("label.png");
+  // ===== ITEMS =====
+  y = printSectionTitle(img, fontNormal, "Chi tiết đơn hàng", y);
 
-    // Chuyển greyscale, tăng contrast
-    img.greyscale().contrast(0.4).brightness(0.1);
+  data.items.forEach((p) => {
+    y = printLine(img, fontNormal, p.name, y);
+    y = printLine(
+      img,
+      fontNormal,
+      `${p.quantity} x ${price(p.price)} = ${price(p.price * p.quantity)}đ`,
+      y
+    );
+    y += 10;
+  });
 
-    // Resize về chiều rộng chuẩn
-    img.resize(PRINT_WIDTH, Jimp.AUTO);
+  // ===== TOTAL =====
+  drawSeparator(img, y);
+  y += 20;
 
-    // 3. Tạo canvas lớn hơn để canh giữa
-    const canvas = new Jimp(CANVAS_WIDTH, img.bitmap.height, 0xffffffff);
+  img.print(
+    fontBold,
+    0,
+    y,
+    { text: "TỔNG CỘNG", alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  y += 45;
 
-    const centerOffset = Math.floor((CANVAS_WIDTH - PRINT_WIDTH) / 2);
-    const finalOffset = centerOffset + MACHINE_OFFSET;
+  img.print(
+    fontBold,
+    0,
+    y,
+    { text: `${price(data.total)}đ`, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  y += 50;
 
-    // Composite ảnh vào canvas
-    canvas.composite(img, finalOffset, 0);
+  drawSeparator(img, y);
+  y += 20;
 
-    // Lưu debug
-    await canvas.writeAsync("debug_centered.png");
-    console.log("✅ Đã lưu debug_centered.png");
+  // ===== FOOTER =====
+  y = printLine(img, fontNormal, "Nhân viên: ___________________", y);
+  y = printLine(img, fontNormal, "Khách hàng: __________________", y);
 
-    // 4. Convert sang bitmap mono
-    const width = canvas.bitmap.width;
-    const height = canvas.bitmap.height;
+  img.print(
+    fontNormal,
+    0,
+    y,
+    { text: "Cảm ơn quý khách!", alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER },
+    WIDTH
+  );
+  y += 50;
 
-    const bytesPerRow = Math.ceil(width / 8);
-    const bitmap = Buffer.alloc(bytesPerRow * height);
+  // Crop lại đúng chiều cao thực
+  return img.crop(0, 0, WIDTH, y + 20);
+}
 
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (y * width + x) * 4;
-        const pixel = canvas.bitmap.data[idx];
+// ==================== CONVERT TO BITMAP ====================
+function convertToBitmap(img) {
+  const width = img.bitmap.width;
+  const height = img.bitmap.height;
+  const bytesPerRow = Math.ceil(width / 8);
 
-        // Pixel tối (đen) → bit = 1 → in màu đen
-        if (pixel < 128) {
-          bitmap[y * bytesPerRow + (x >> 3)] |= 0x80 >> x % 8;
-        }
+  const buffer = Buffer.alloc(bytesPerRow * height);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const pixel = img.bitmap.data[idx];
+
+      if (pixel < 128) {
+        buffer[y * bytesPerRow + (x >> 3)] |= 0x80 >> x % 8;
       }
     }
+  }
 
-    // 5. Tạo lệnh TSPL với chiều cao động
+  return { buffer, bytesPerRow, height };
+}
 
-    // Tính chiều cao giấy theo pixel (203 DPI)
-    // 1mm = 8 dots (203 DPI / 25.4)
-    const heightMM = Math.ceil(height / 8 + 10); // +10mm buffer
+// ==================== SEND TO PRINTER ====================
+function sendToPrinter(bitmap, bytesPerRow, height) {
+  return new Promise((resolve, reject) => {
+    let cmd = "";
+    cmd += "SIZE 80 mm,100 mm\r\n";
+    cmd += "GAP 2 mm,0 mm\r\n";
+    cmd += "CLS\r\n";
+    cmd += `BITMAP 0,0,${bytesPerRow},${height},0,`;
 
-    console.log(`📏 Chiều cao ảnh: ${height}px`);
-    console.log(`📏 Chiều cao giấy: ${heightMM}mm`);
-
-    let tspl = "";
-    tspl += `SIZE 80 mm,${heightMM} mm\r\n`; // ✅ Chiều cao động
-    tspl += "GAP 2 mm,0 mm\r\n";
-    tspl += "CLS\r\n";
-    tspl += `BITMAP 0,10,${bytesPerRow},${height},0,`;
-
-    const header = Buffer.from(tspl, "ascii");
+    const header = Buffer.from(cmd, "ascii");
     const footer = Buffer.from("\r\nPRINT 1\r\n", "ascii");
-    const printCmd = Buffer.concat([header, bitmap, footer]);
 
-    // 6. Gửi tới máy in
-    console.log("🖨 Đang gửi lệnh in...");
+    const sendData = Buffer.concat([header, bitmap, footer]);
 
-    return new Promise((resolve, reject) => {
-      const client = new net.Socket();
-
-      // Timeout 10 giây
-      client.setTimeout(10000);
-
-      client.connect(PRINTER_PORT, PRINTER_IP, () => {
-        console.log("✅ Đã kết nối máy in");
-        client.write(printCmd, (err) => {
-          if (err) {
-            console.error("❌ Lỗi ghi dữ liệu:", err.message);
-            reject(err);
-          } else {
-            console.log("✅ In xong!");
-            client.end();
-            resolve();
-          }
-        });
-      });
-
-      client.on("error", (err) => {
-        console.error("❌ Lỗi máy in:", err.message);
-        reject(err);
-      });
-
-      client.on("timeout", () => {
-        console.error("❌ Timeout kết nối máy in");
-        client.destroy();
-        reject(new Error("Printer timeout"));
+    const client = new net.Socket();
+    client.connect(PRINTER_PORT, PRINTER_IP, () => {
+      client.write(sendData, () => {
+        client.end();
+        resolve();
       });
     });
-  } catch (err) {
-    console.error("❌ Lỗi printHTML:", err.message);
-    throw err;
-  }
+
+    client.on("error", reject);
+  });
 }
 
-// ==========================
-//  WORKER CHÍNH
-// ==========================
+// ==================== WORKER ====================
 async function worker() {
-  try {
-    const queue = await getPrintQueue();
+  const queue = await getPrintQueue();
+  if (!queue.length) return;
+  console.log(queue);
+  for (const item of queue) {
+    const data = JSON.parse(item.data);
 
-    if (!queue.length) {
-      return;
+    await setStatus(item.id, "printing");
+
+    try {
+      const img = await drawReceipt(data);
+      const { buffer, bytesPerRow, height } = convertToBitmap(img);
+      await sendToPrinter(buffer, bytesPerRow, height);
+
+      await deletePrinted(item.id);
+    } catch (e) {
+      console.error("❌ Lỗi khi in job:", item.id);
+      console.error(e);
+      await setStatus(item.id, "pending");
     }
-
-    console.log(`📦 Có ${queue.length} job mới`);
-
-    for (const item of queue) {
-      console.log(`\n🔒 Đang xử lý job #${item.id}`);
-      await setStatus(item.id, "printing");
-
-      try {
-        await printHTML(item.html);
-
-        console.log(`🗑 Xóa job #${item.id}`);
-        await deletePrinted(item.id);
-      } catch (err) {
-        console.error(`❌ Lỗi in job #${item.id}:`, err.message);
-        console.log("⚠️ Trả job về trạng thái pending");
-        await setStatus(item.id, "pending");
-      }
-    }
-  } catch (err) {
-    console.error("❌ Lỗi worker:", err.message);
   }
 }
 
-// ==========================
-//  CHẠY WORKER
-// ==========================
-console.log("🚀 Print Worker đang khởi động...");
-console.log(`📡 API: ${API_URL}`);
-console.log(`🖨 Printer: ${PRINTER_IP}:${PRINTER_PORT}`);
-console.log(`📏 Canvas: ${CANVAS_WIDTH}px, Print: ${PRINT_WIDTH}px\n`);
-
-// Chạy worker mỗi 2 giây
-setInterval(worker, 1000);
-
-// Chạy ngay lần đầu
-worker();
+setInterval(worker, 2000);
