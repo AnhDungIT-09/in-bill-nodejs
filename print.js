@@ -5,7 +5,7 @@ const axios = require("axios");
 // ==========================
 // CONFIG
 // ==========================
-const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
+const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/print.php";
 
 const HCTI_API = "https://hcti.io/v1/image";
 const HCTI_USER_ID = "01KA8CK32Z4FVS04W1VG2123EY"; // <-- THAY VÀO
