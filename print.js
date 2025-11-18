@@ -1,109 +1,144 @@
+const nodeHtmlToImage = require("node-html-to-image");
 const Jimp = require("jimp");
+const fs = require("fs");
 const net = require("net");
 const axios = require("axios");
 
-// ==========================
-// CONFIG
-// ==========================
-const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-
-const HCTI_API = "https://hcti.io/v1/image";
-const HCTI_USER_ID = "01KA8CK32Z4FVS04W1VG2123EY"; // <-- THAY VÀO
-const HCTI_API_KEY = "019a90c9-8c5f-7fac-bde0-b36768136061"; // <-- THAY VÀO
-
+const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/print.php";
 const PRINTER_IP = "192.168.1.110";
 const PRINTER_PORT = 9100;
 
-// Khổ in 80mm
 const CANVAS_WIDTH = 576;
 const PRINT_WIDTH = 560;
 const MACHINE_OFFSET = 12;
 
 // ==========================
-// API QUEUE
+//  HÀM API
 // ==========================
+
+// Helper function để delay
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function getPrintQueue() {
-  console.log("📡 Gọi API get_all...");
-  const res = await axios.post(API_URL, { action: "get_all" });
-  console.log("📥 Kết quả get_all:", res.data);
-  return res.data.data || [];
+  try {
+    const res = await axios.post(API_URL, { action: "get_all" });
+    return res.data.data || [];
+  } catch (err) {
+    console.error("❌ Lỗi API getPrintQueue:", err.message);
+    return [];
+  }
 }
 
 async function deletePrinted(id) {
-  console.log("🗑 Xóa job ID:", id);
-  await axios.post(API_URL, { action: "delete", id });
+  try {
+    await axios.post(API_URL, { action: "delete", id });
+  } catch (err) {
+    console.error("❌ Lỗi API deletePrinted:", err.message);
+  }
 }
 
 async function setStatus(id, status) {
-  console.log(`🔧 Update status ${id} → ${status}`);
-  await axios.post(API_URL, { action: "set_status", id, status });
+  try {
+    await axios.post(API_URL, {
+      action: "set_status",
+      id,
+      status,
+    });
+  } catch (err) {
+    console.error("❌ Lỗi API setStatus:", err.message);
+  }
 }
 
 // ==========================
-// RENDER HTML → PNG (MIỄN PHÍ)
-// ==========================
-async function renderHTMLtoPNG(html) {
-  console.log("🎨 Render qua htmlcsstoimage.com ...");
-
-  const res = await axios.post(
-    HCTI_API,
-    { html, google_fonts: "Roboto" },
-    {
-      auth: {
-        username: HCTI_USER_ID,
-        password: HCTI_API_KEY,
-      },
-      timeout: 15000,
-    }
-  );
-
-  console.log("✔ Nhận link PNG:", res.data.url);
-
-  // tải ảnh về dưới dạng buffer
-  const imgRes = await axios.get(res.data.url, { responseType: "arraybuffer" });
-
-  return Buffer.from(imgRes.data);
-}
-
-// ==========================
-// XỬ LÝ IN
+//  RENDER HTML → PNG
 // ==========================
 async function printHTML(html) {
-  console.log("\n===============================");
-  console.log("🖨 BẮT ĐẦU QUY TRÌNH IN");
-  console.log("===============================\n");
+  console.log("🔄 Render HTML...");
 
   try {
-    console.log("1️⃣ Render HTML → PNG");
-    const pngBuffer = await renderHTMLtoPNG(html);
+    // 1. Render HTML → PNG với node-html-to-image
+    await nodeHtmlToImage({
+      output: "./label.png",
+      html: html,
+      type: "png",
+      puppeteerArgs: {
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      },
+      beforeScreenshot: async (page) => {
+        // Set viewport ban đầu
+        await page.setViewport({
+          width: CANVAS_WIDTH,
+          height: 100,
+          deviceScaleFactor: 2,
+        });
 
-    await Jimp.read(pngBuffer).then((img) => img.writeAsync("label.png"));
-    console.log("✔ Lưu file label.png");
+        // Đợi tất cả fonts và styles load xong
+        await page.evaluateHandle("document.fonts.ready");
+        await sleep(500);
 
-    console.log("2️⃣ Load PNG + grayscale");
-    const img = await Jimp.read("label.png");
+        // Tính chiều cao thực tế (lấy max của các giá trị)
+        const dimensions = await page.evaluate(() => {
+          const body = document.body;
+          const html = document.documentElement;
 
-    img
-      .greyscale()
-      .contrast(0.4)
-      .brightness(0.1)
-      .resize(PRINT_WIDTH, Jimp.AUTO);
+          return {
+            scrollHeight: Math.max(
+              body.scrollHeight,
+              body.offsetHeight,
+              html.clientHeight,
+              html.scrollHeight,
+              html.offsetHeight
+            ),
+            clientHeight: html.clientHeight,
+          };
+        });
 
-    console.log("✔ Resize xong");
+        // Thêm buffer 50px để chắc chắn
+        const finalHeight = dimensions.scrollHeight + 50;
 
-    console.log("3️⃣ Tạo canvas để canh giữa");
+        console.log(`📏 Chiều cao tính được: ${dimensions.scrollHeight}px`);
+        console.log(`📏 Chiều cao cuối cùng: ${finalHeight}px`);
+
+        // Set lại viewport với chiều cao đúng
+        await page.setViewport({
+          width: CANVAS_WIDTH,
+          height: finalHeight,
+          deviceScaleFactor: 2,
+        });
+
+        // Đợi thêm một chút để render hoàn tất
+        await sleep(300);
+      },
+    });
+
+    console.log("✅ Đã render HTML → PNG");
+
+    // 2. Xử lý ảnh với Jimp
+    let img = await Jimp.read("label.png");
+
+    // Chuyển greyscale, tăng contrast
+    img.greyscale().contrast(0.4).brightness(0.1);
+
+    // Resize về chiều rộng chuẩn
+    img.resize(PRINT_WIDTH, Jimp.AUTO);
+
+    // 3. Tạo canvas lớn hơn để canh giữa
     const canvas = new Jimp(CANVAS_WIDTH, img.bitmap.height, 0xffffffff);
+
     const centerOffset = Math.floor((CANVAS_WIDTH - PRINT_WIDTH) / 2);
     const finalOffset = centerOffset + MACHINE_OFFSET;
 
+    // Composite ảnh vào canvas
     canvas.composite(img, finalOffset, 0);
+
+    // Lưu debug
     await canvas.writeAsync("debug_centered.png");
-    console.log("✔ debug_centered.png OK");
+    console.log("✅ Đã lưu debug_centered.png");
 
-    console.log("4️⃣ Convert → mono bitmap");
-
+    // 4. Convert sang bitmap mono
     const width = canvas.bitmap.width;
     const height = canvas.bitmap.height;
+
     const bytesPerRow = Math.ceil(width / 8);
     const bitmap = Buffer.alloc(bytesPerRow * height);
 
@@ -111,39 +146,53 @@ async function printHTML(html) {
       for (let x = 0; x < width; x++) {
         const idx = (y * width + x) * 4;
         const pixel = canvas.bitmap.data[idx];
-        if (pixel < 160) {
+
+        // Pixel tối (đen) → bit = 1 → in màu đen
+        if (pixel < 128) {
           bitmap[y * bytesPerRow + (x >> 3)] |= 0x80 >> x % 8;
         }
       }
     }
 
-    console.log("✔ Convert bitmap OK");
+    // 5. Tạo lệnh TSPL với chiều cao động
 
-    // ===================== TSPL
-    console.log("5️⃣ Chuẩn bị lệnh TSPL");
+    // Tính chiều cao giấy theo pixel (203 DPI)
+    // 1mm = 8 dots (203 DPI / 25.4)
+    const heightMM = Math.ceil(height / 8 + 10); // +10mm buffer
+
+    console.log(`📏 Chiều cao ảnh: ${height}px`);
+    console.log(`📏 Chiều cao giấy: ${heightMM}mm`);
 
     let tspl = "";
-    tspl += "SIZE 80 mm,80 mm\r\n";
+    tspl += `SIZE 80 mm,${heightMM} mm\r\n`; // ✅ Chiều cao động
     tspl += "GAP 2 mm,0 mm\r\n";
     tspl += "CLS\r\n";
     tspl += `BITMAP 0,10,${bytesPerRow},${height},0,`;
 
     const header = Buffer.from(tspl, "ascii");
     const footer = Buffer.from("\r\nPRINT 1\r\n", "ascii");
-
     const printCmd = Buffer.concat([header, bitmap, footer]);
 
-    console.log("6️⃣ Gửi tới máy in...");
+    // 6. Gửi tới máy in
+    console.log("🖨 Đang gửi lệnh in...");
 
-    return await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const client = new net.Socket();
 
+      // Timeout 10 giây
+      client.setTimeout(10000);
+
       client.connect(PRINTER_PORT, PRINTER_IP, () => {
-        console.log("📡 Kết nối máy in OK");
-        client.write(printCmd, () => {
-          console.log("✅ Đã gửi lệnh in");
-          client.end();
-          resolve();
+        console.log("✅ Đã kết nối máy in");
+        client.write(printCmd, (err) => {
+          if (err) {
+            console.error("❌ Lỗi ghi dữ liệu:", err.message);
+            reject(err);
+          } else {
+            console.log("✅ In xong!");
+            client.end();
+            resolve();
+          }
         });
       });
 
@@ -151,50 +200,62 @@ async function printHTML(html) {
         console.error("❌ Lỗi máy in:", err.message);
         reject(err);
       });
+
+      client.on("timeout", () => {
+        console.error("❌ Timeout kết nối máy in");
+        client.destroy();
+        reject(new Error("Printer timeout"));
+      });
     });
   } catch (err) {
-    console.error("🔥 LỖI printHTML:", err);
+    console.error("❌ Lỗi printHTML:", err.message);
     throw err;
   }
 }
 
 // ==========================
-// WORKER
+//  WORKER CHÍNH
 // ==========================
 async function worker() {
-  console.log("\n⏳ Worker chạy...");
-
-  let queue = [];
-
   try {
-    queue = await getPrintQueue();
-  } catch (err) {
-    console.error("❌ Lỗi load queue:", err);
-    return;
-  }
+    const queue = await getPrintQueue();
 
-  if (!queue.length) {
-    console.log("→ Không có job");
-    return;
-  }
-
-  console.log(`📦 Có ${queue.length} job mới`);
-
-  for (const item of queue) {
-    console.log("\n==============================");
-    console.log("▶ Xử lý job:", item.id);
-    console.log("==============================");
-
-    await setStatus(item.id, "printing");
-
-    try {
-      await printHTML(item.html);
-      await deletePrinted(item.id);
-    } catch (err) {
-      console.error("❌ In lỗi → trả về pending");
-      await setStatus(item.id, "pending");
+    if (!queue.length) {
+      return;
     }
+
+    console.log(`📦 Có ${queue.length} job mới`);
+
+    for (const item of queue) {
+      console.log(`\n🔒 Đang xử lý job #${item.id}`);
+      await setStatus(item.id, "printing");
+
+      try {
+        await printHTML(item.html);
+
+        console.log(`🗑 Xóa job #${item.id}`);
+        await deletePrinted(item.id);
+      } catch (err) {
+        console.error(`❌ Lỗi in job #${item.id}:`, err.message);
+        console.log("⚠️ Trả job về trạng thái pending");
+        await setStatus(item.id, "pending");
+      }
+    }
+  } catch (err) {
+    console.error("❌ Lỗi worker:", err.message);
   }
 }
 
-setInterval(worker, 2000);
+// ==========================
+//  CHẠY WORKER
+// ==========================
+console.log("🚀 Print Worker đang khởi động...");
+console.log(`📡 API: ${API_URL}`);
+console.log(`🖨 Printer: ${PRINTER_IP}:${PRINTER_PORT}`);
+console.log(`📏 Canvas: ${CANVAS_WIDTH}px, Print: ${PRINT_WIDTH}px\n`);
+
+// Chạy worker mỗi 2 giây
+setInterval(worker, 1000);
+
+// Chạy ngay lần đầu
+worker();
