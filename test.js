@@ -7,8 +7,10 @@ const iconv = require("iconv-lite");
 // CONFIG
 // ==============================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-const PRINTER_IP = "192.168.1.250";
-const PRINTER_PORT = 9100;
+const API_URL_SETTING =
+  "https://dinhdungit.click/BackEndZaloFnB/api/in/setting.php";
+// const PRINTER_IP = "192.168.1.250";
+// const PRINTER_PORT = 9100;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,6 +33,22 @@ const COMMANDS = {
   LINE_FEED: Buffer.from([0x0a]), // Xuống dòng
   CUT_PAPER: Buffer.from([GS, 0x56, 0x00]), // Cắt giấy
 };
+
+async function loadPrinterConfig() {
+  try {
+    const res = await axios.post(API_URL_SETTING, { action: "get_printer" });
+    if (res.data.success && res.data.data) {
+      return {
+        ip: res.data.data.ip,
+        port: parseInt(res.data.data.port, 10),
+      };
+    }
+  } catch (e) {
+    console.log("Lỗi load máy in:", e.message);
+  }
+
+  return { ip: "192.168.1.250", port: 9100 };
+}
 
 // ==============================
 // API QUEUE
@@ -293,7 +311,7 @@ function formatBillText(html) {
 // ==============================
 // IN ESC/POS
 // ==============================
-async function printESCPOS(html) {
+async function printESCPOS(html, ip, port) {
   const lines = formatBillText(html);
 
   const buffers = [COMMANDS.INIT];
@@ -346,7 +364,7 @@ async function printESCPOS(html) {
   return new Promise((resolve, reject) => {
     const client = new net.Socket();
 
-    client.connect(PRINTER_PORT, PRINTER_IP, () => {
+    client.connect(port, ip, () => {
       client.write(printData, (err) => {
         if (err) return reject(err);
         client.end();
@@ -378,12 +396,13 @@ async function worker() {
   if (!queue.length) return;
 
   console.log(`📦 Có ${queue.length} job mới`);
+  const { ip, port } = await loadPrinterConfig();
 
   for (const job of queue) {
     console.log(`➡ Xử lý job #${job.id}`);
 
     try {
-      await printESCPOS(job.html);
+      await printESCPOS(job.html, ip, port);
 
       // Xóa job sau khi in thành công
       await deletePrinted(job.id);

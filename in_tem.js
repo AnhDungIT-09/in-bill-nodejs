@@ -1,5 +1,3 @@
-const Jimp = require("jimp");
-const fs = require("fs");
 const net = require("net");
 const axios = require("axios");
 const htmlToText = require("html-to-text");
@@ -8,51 +6,26 @@ const htmlToText = require("html-to-text");
 // CONFIG
 // ==============================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-const PRINTER_IP = "192.168.1.110";
-const PRINTER_PORT = 9100;
-
-const CANVAS_WIDTH = 576; // 80mm
-const PRINT_WIDTH = 540;
-const PADDING_LEFT = 20;
-const PADDING_TOP = 20;
-const LINE_SPACING = 2;
-const FONT_SIZE = 16; // Giảm từ 18 xuống 16
-
-let FONT_NORMAL;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ==============================
-// LOAD FONT - Dùng font built-in của Jimp
+// ESC/POS COMMANDS
 // ==============================
-async function loadFonts() {
-  // Load font built-in 16px của Jimp (hỗ trợ Latin cơ bản)
-  FONT_NORMAL = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
-  console.log("✔ Loaded Jimp built-in font 16px");
+const ESC = 0x1b;
+const GS = 0x1d;
 
-  // Test font
-  try {
-    const testImg = new Jimp(576, 150, 0xffffffff);
-    const testLines = [
-      "PHIEU XUAT KHO",
-      "#REQ004",
-      "Chi nhanh: Bun Bo 1991",
-      "Ngay: 17/11/2025 12:56:22",
-      "Trang thai: Hoan thanh",
-    ];
-
-    let y = 10;
-    for (const line of testLines) {
-      await testImg.print(FONT_NORMAL, 20, y, line);
-      y += 22;
-    }
-
-    await testImg.writeAsync("test_font_preview.png");
-    console.log("✔ Font test saved: test_font_preview.png");
-  } catch (e) {
-    console.log("⚠ Warning: Font test failed -", e.message);
-  }
-}
+const COMMANDS = {
+  INIT: Buffer.from([ESC, 0x40]),
+  ALIGN_LEFT: Buffer.from([ESC, 0x61, 0x00]),
+  ALIGN_CENTER: Buffer.from([ESC, 0x61, 0x01]),
+  ALIGN_RIGHT: Buffer.from([ESC, 0x61, 0x02]),
+  BOLD_ON: Buffer.from([ESC, 0x45, 0x01]),
+  BOLD_OFF: Buffer.from([ESC, 0x45, 0x00]),
+  SIZE_NORMAL: Buffer.from([GS, 0x21, 0x00]),
+  SIZE_DOUBLE: Buffer.from([GS, 0x21, 0x11]),
+  LINE_FEED: Buffer.from([0x0a]),
+  CUT_PAPER: Buffer.from([GS, 0x56, 0x00]),
+};
 
 // ==============================
 // API QUEUE
@@ -70,19 +43,36 @@ async function getPrintQueue() {
 async function deletePrinted(id) {
   try {
     await axios.post(API_URL, { action: "delete", id });
-    console.log(`🗑 Đã xóa job #${id}`);
-    return true;
+    console.log(`🗑 Xóa job #${id}`);
   } catch (e) {
-    console.log("Lỗi delete:", e.message);
-    return false;
+    console.log("Lỗi xóa job:", e.message);
   }
+}
+
+// ==============================
+// LẤY IP & PORT TỪ DATABASE
+// ==============================
+async function loadPrinterConfig() {
+  try {
+    const res = await axios.post(API_URL, { action: "get_printer" });
+    if (res.data.success && res.data.data) {
+      return {
+        ip: res.data.data.ip,
+        port: parseInt(res.data.data.port, 10),
+      };
+    }
+  } catch (e) {
+    console.log("Lỗi load máy in:", e.message);
+  }
+
+  return { ip: "192.168.1.250", port: 9100 };
 }
 
 // ==============================
 // BỎ DẤU TIẾNG VIỆT
 // ==============================
 function removeDiacritics(str) {
-  const diacriticsMap = {
+  const map = {
     á: "a",
     à: "a",
     ả: "a",
@@ -100,6 +90,7 @@ function removeDiacritics(str) {
     ẩ: "a",
     ẫ: "a",
     ậ: "a",
+    đ: "d",
     é: "e",
     è: "e",
     ẻ: "e",
@@ -149,269 +140,89 @@ function removeDiacritics(str) {
     ỷ: "y",
     ỹ: "y",
     ỵ: "y",
-    đ: "d",
-    Á: "A",
-    À: "A",
-    Ả: "A",
-    Ã: "A",
-    Ạ: "A",
-    Ă: "A",
-    Ắ: "A",
-    Ằ: "A",
-    Ẳ: "A",
-    Ẵ: "A",
-    Ặ: "A",
-    Â: "A",
-    Ấ: "A",
-    Ầ: "A",
-    Ẩ: "A",
-    Ẫ: "A",
-    Ậ: "A",
-    É: "E",
-    È: "E",
-    Ẻ: "E",
-    Ẽ: "E",
-    Ẹ: "E",
-    Ê: "E",
-    Ế: "E",
-    Ề: "E",
-    Ể: "E",
-    Ễ: "E",
-    Ệ: "E",
-    Í: "I",
-    Ì: "I",
-    Ỉ: "I",
-    Ĩ: "I",
-    Ị: "I",
-    Ó: "O",
-    Ò: "O",
-    Ỏ: "O",
-    Õ: "O",
-    Ọ: "O",
-    Ô: "O",
-    Ố: "O",
-    Ồ: "O",
-    Ổ: "O",
-    Ỗ: "O",
-    Ộ: "O",
-    Ơ: "O",
-    Ớ: "O",
-    Ờ: "O",
-    Ở: "O",
-    Ỡ: "O",
-    Ợ: "O",
-    Ú: "U",
-    Ù: "U",
-    Ủ: "U",
-    Ũ: "U",
-    Ụ: "U",
-    Ư: "U",
-    Ứ: "U",
-    Ừ: "U",
-    Ử: "U",
-    Ữ: "U",
-    Ự: "U",
-    Ý: "Y",
-    Ỳ: "Y",
-    Ỷ: "Y",
-    Ỹ: "Y",
-    Ỵ: "Y",
-    Đ: "D",
   };
 
-  return str
-    .split("")
-    .map((char) => diacriticsMap[char] || char)
-    .join("");
+  return str.replace(/[^A-Za-z0-9 ]/g, (c) => map[c] || c);
 }
 
 // ==============================
-// XỬ LÝ FORMAT TEXT - Giống template HTML
+// FORMAT HÓA ĐƠN
 // ==============================
-function formatText(text) {
-  const lines = text.split("\n");
-  const result = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trimEnd();
-    const nextLine = lines[i + 1] ? lines[i + 1].trim() : "";
-
-    // Nhận diện format: "1x50.000d = 50.000d" (cả 2 giá trên cùng dòng)
-    if (nextLine.match(/^\d+x[\d.]+d\s*=\s*[\d.]+d$/)) {
-      // Tên món bên trái, giá bên phải
-      const maxWidth = 52;
-      const itemName = line.length > 34 ? line.substring(0, 34) : line;
-      const price = nextLine;
-
-      const padding = maxWidth - itemName.length - price.length;
-      const spaces = padding > 0 ? " ".repeat(padding) : " ";
-
-      result.push(itemName + spaces + price);
-      i++; // Bỏ qua dòng giá
-    }
-    // Nhận diện format riêng: "1x50.000d" trên 1 dòng, "= 50.000d" dòng sau
-    else if (nextLine.match(/^\d+x[\d.]+d$/)) {
-      const nextNextLine = lines[i + 2] ? lines[i + 2].trim() : "";
-
-      // Nếu dòng thứ 3 là "= xxx"
-      if (nextNextLine.match(/^=\s*[\d.]+d$/)) {
-        const maxWidth = 52;
-        const itemName = line.length > 34 ? line.substring(0, 34) : line;
-        const combinedPrice = nextLine + " " + nextNextLine;
-
-        const padding = maxWidth - itemName.length - combinedPrice.length;
-        const spaces = padding > 0 ? " ".repeat(padding) : " ";
-
-        result.push(itemName + spaces + combinedPrice);
-        i += 2; // Bỏ qua 2 dòng giá
-      } else {
-        // Chỉ có giá đơn giản
-        const maxWidth = 52;
-        const itemName = line.length > 34 ? line.substring(0, 34) : line;
-        const price = nextLine;
-
-        const padding = maxWidth - itemName.length - price.length;
-        const spaces = padding > 0 ? " ".repeat(padding) : " ";
-
-        result.push(itemName + spaces + price);
-        i++;
-      }
-    }
-    // Nhận diện TỔNG CỘNG
-    else if (line.match(/^TONG CONG$/i)) {
-      result.push("");
-      result.push(line);
-      // Dòng tiếp theo là số tiền
-      if (nextLine.match(/^[\d.]+d$/)) {
-        result.push(nextLine);
-        i++;
-      }
-    } else {
-      result.push(line);
-    }
-  }
-
-  return result.join("\n");
-}
-
-// ==============================
-// HTML → TEXT → PNG bằng JIMP
-// ==============================
-async function htmlToPNG(html, output = "label.png") {
-  console.log("🔄 Chuyển HTML → TEXT → PNG…");
-
-  // Log HTML gốc để debug
-  console.log("HTML gốc:", html.substring(0, 200) + "...");
-
-  const text = htmlToText.convert(html, {
-    wordwrap: 50, // Giảm xuống 50 để tên món dài tự xuống dòng
+function formatBillText(html) {
+  let text = htmlToText.convert(html, {
+    wordwrap: false,
     preserveNewlines: true,
-    formatters: {
-      formatBlock: (elem, walk, builder, formatOptions) => {
-        builder.addInline(elem.text || "", { leadingLineBreaks: 1 });
-      },
-    },
   });
 
-  // BỎ DẤU TIẾNG VIỆT
-  let textNoDiacritics = removeDiacritics(text);
+  text = removeDiacritics(text);
 
-  // LOẠI BỎ KHOẢNG TRẮNG THỪA (nhiều space thành 1 space)
-  textNoDiacritics = textNoDiacritics
+  const lines = text
     .split("\n")
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .join("\n");
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
-  console.log("========== TEXT TRƯỚC KHI FORMAT ==========");
-  console.log(textNoDiacritics);
-  console.log("===========================================");
+  const result = [];
+  const MAX = 48;
 
-  // FORMAT: Ghép giá với tên món
-  const textFormatted = formatText(textNoDiacritics);
-
-  console.log("========== TEXT SAU KHI FORMAT ==========");
-  console.log(textFormatted);
-  console.log("=========================================");
-
-  const lines = textFormatted.split("\n").map((l) => l.trimEnd());
-
-  // Tính chiều cao
-  let height = PADDING_TOP;
-  for (const line of lines) {
-    if (line.trim() === "") {
-      height += 5;
-    } else {
-      height += FONT_SIZE + LINE_SPACING;
+  for (let line of lines) {
+    if (line.match(/^HOA DON BAN HANG/i)) {
+      result.push("CENTER:BOLD:" + line);
+      continue;
     }
-  }
-  height += 20;
 
-  if (height < 200) height = 200;
-
-  const img = new Jimp(CANVAS_WIDTH, height, 0xffffffff);
-
-  let y = PADDING_TOP;
-
-  for (const line of lines) {
-    if (line.trim() === "") {
-      y += 5;
-    } else {
-      await img.print(FONT_NORMAL, PADDING_LEFT, y, line, PRINT_WIDTH);
-      y += FONT_SIZE + LINE_SPACING;
+    if (line.match(/^#\w+/)) {
+      result.push("CENTER:" + line);
+      continue;
     }
+
+    result.push(line);
   }
-
-  await img.writeAsync(output);
-  console.log("✔ Đã tạo PNG:", output);
-
-  return output;
+  return result;
 }
 
 // ==============================
-// PNG → TSPL
+// IN ESC/POS
 // ==============================
-async function printPNG_TSPL(path) {
-  console.log("➡ Xử lý ảnh để in TSPL…");
+async function printESCPOS(html, ip, port) {
+  const lines = formatBillText(html);
 
-  const img = await Jimp.read(path);
+  const buffers = [COMMANDS.INIT];
 
-  // Tăng độ tương phản và làm chữ đậm hơn
-  img.greyscale().contrast(0.6).posterize(2);
-
-  const width = img.bitmap.width;
-  const height = img.bitmap.height;
-
-  const bytesPerRow = Math.ceil(width / 8);
-  const bitmap = Buffer.alloc(bytesPerRow * height);
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      if (img.bitmap.data[idx] < 128) {
-        bitmap[y * bytesPerRow + (x >> 3)] |= 0x80 >> x % 8;
-      }
+  for (let line of lines) {
+    if (line.startsWith("CENTER:BOLD:")) {
+      line = line.replace("CENTER:BOLD:", "");
+      buffers.push(
+        COMMANDS.ALIGN_CENTER,
+        COMMANDS.SIZE_DOUBLE,
+        COMMANDS.BOLD_ON,
+        Buffer.from(line + "\n", "ascii"),
+        COMMANDS.BOLD_OFF,
+        COMMANDS.SIZE_NORMAL,
+        COMMANDS.ALIGN_LEFT
+      );
+    } else if (line.startsWith("CENTER:")) {
+      line = line.replace("CENTER:", "");
+      buffers.push(
+        COMMANDS.ALIGN_CENTER,
+        Buffer.from(line + "\n", "ascii"),
+        COMMANDS.ALIGN_LEFT
+      );
+    } else {
+      buffers.push(Buffer.from(line + "\n", "ascii"));
     }
   }
 
-  const heightMM = Math.ceil(height / 8 + 6);
+  buffers.push(COMMANDS.LINE_FEED, COMMANDS.LINE_FEED, COMMANDS.CUT_PAPER);
 
-  const headerText =
-    `SIZE 80 mm,${heightMM} mm\r\n` +
-    `GAP 2 mm,0 mm\r\nCLS\r\n` +
-    `BITMAP 0,10,${bytesPerRow},${height},0,`;
+  const data = Buffer.concat(buffers);
 
-  const header = Buffer.from(headerText, "ascii");
-  const footer = Buffer.from("\r\nPRINT 1\r\n", "ascii");
-  const printData = Buffer.concat([header, bitmap, footer]);
-
-  console.log("🖨 Đang gửi lệnh TSPL…");
+  console.log(`🖨 In đến ${ip}:${port}...`);
 
   return new Promise((resolve, reject) => {
     const client = new net.Socket();
 
-    client.connect(PRINTER_PORT, PRINTER_IP, () => {
-      client.write(printData, (err) => {
-        if (err) return reject(err);
+    client.connect(port, ip, () => {
+      client.write(data, () => {
         client.end();
         console.log("✔ In thành công!");
         resolve();
@@ -419,14 +230,8 @@ async function printPNG_TSPL(path) {
     });
 
     client.on("error", (err) => {
-      console.log("❌ Lỗi kết nối máy in:", err.message);
+      console.log("❌ Lỗi máy in:", err.message);
       reject(err);
-    });
-
-    client.on("timeout", () => {
-      console.log("⏱ Timeout kết nối máy in");
-      client.destroy();
-      reject(new Error("Connection timeout"));
     });
 
     client.setTimeout(5000);
@@ -440,40 +245,25 @@ async function worker() {
   const queue = await getPrintQueue();
   if (!queue.length) return;
 
-  console.log(`📦 Có ${queue.length} job mới`);
+  const { ip, port } = await loadPrinterConfig();
+  console.log("🖨 Cấu hình máy in:", ip, port);
 
   for (const job of queue) {
-    console.log(`➡ Xử lý job #${job.id}`);
-
+    console.log(`➡ In job #${job.id}`);
     try {
-      const png = await htmlToPNG(job.html, `label_${job.id}.png`);
-      await printPNG_TSPL(png);
-
-      // Xóa job sau khi in thành công
+      await printESCPOS(job.html, ip, port);
       await deletePrinted(job.id);
-      await sleep(200);
-
-      // KHÔNG xóa file PNG để kiểm tra
-      console.log(`✅ File PNG đã lưu tại: ${png} (không xóa để kiểm tra)`);
-    } catch (err) {
-      console.log("❌ Lỗi in job:", err.message);
+      await sleep(300);
+    } catch (e) {
+      console.log("❌ Lỗi job:", e.message);
     }
   }
 }
 
 // ==============================
-// START
+// START SERVICE
 // ==============================
 (async () => {
-  console.log("🚀 TSPL Printer Worker - Starting...");
-
-  await loadFonts();
-
-  console.log("✅ Worker TSPL đang chạy (BỎ DẤU TIẾNG VIỆT)…");
-  console.log(`📡 API: ${API_URL}`);
-  console.log(`🖨 Printer: ${PRINTER_IP}:${PRINTER_PORT}`);
-  console.log("⏱ Polling interval: 2s\n");
-
   worker();
   setInterval(worker, 2000);
 })();
