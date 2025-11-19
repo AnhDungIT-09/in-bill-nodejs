@@ -3,6 +3,7 @@
     "axios": "^1.13.2",
     "canvas": "^3.2.0",
     "html-to-text": "^9.0.5",
+    "iconv-lite": "^0.7.0",
     "jimp": "^0.16.13",
     "net": "^1.0.2",
     "node-html-to-image": "^5.0.0"

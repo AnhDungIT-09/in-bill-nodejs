@@ -1,30 +1,46 @@
-const Jimp = require("jimp");
-const fs = require("fs");
 const net = require("net");
 const axios = require("axios");
 const htmlToText = require("html-to-text");
+const iconv = require("iconv-lite");
 
+// ==============================
+// CONFIG
+// ==============================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-const PRINTER_IP = "192.168.1.110";
+const PRINTER_IP = "192.168.1.250";
 const PRINTER_PORT = 9100;
-
-const CANVAS_WIDTH = 576; // 80mm printer
-const PRINT_WIDTH = 520; // nội dung
-const PADDING = 20; // padding lề
-const FONT_SIZE = 24; // cỡ chữ
-const LINE_SPACING = 8;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/*************************************************************
- * 1) Lấy QUEUE từ API
- *************************************************************/
+// ==============================
+// ESC/POS COMMANDS
+// ==============================
+const ESC = 0x1b;
+const GS = 0x1d;
+
+const COMMANDS = {
+  INIT: Buffer.from([ESC, 0x40]), // Khởi tạo máy in
+  ALIGN_LEFT: Buffer.from([ESC, 0x61, 0x00]),
+  ALIGN_CENTER: Buffer.from([ESC, 0x61, 0x01]),
+  ALIGN_RIGHT: Buffer.from([ESC, 0x61, 0x02]),
+  BOLD_ON: Buffer.from([ESC, 0x45, 0x01]),
+  BOLD_OFF: Buffer.from([ESC, 0x45, 0x00]),
+  SIZE_NORMAL: Buffer.from([GS, 0x21, 0x00]),
+  SIZE_DOUBLE: Buffer.from([GS, 0x21, 0x11]), // 2x chiều rộng và cao
+  SIZE_LARGE: Buffer.from([GS, 0x21, 0x22]), // 3x
+  LINE_FEED: Buffer.from([0x0a]), // Xuống dòng
+  CUT_PAPER: Buffer.from([GS, 0x56, 0x00]), // Cắt giấy
+};
+
+// ==============================
+// API QUEUE
+// ==============================
 async function getPrintQueue() {
   try {
     const res = await axios.post(API_URL, { action: "get_all" });
     return res.data.data || [];
-  } catch (err) {
-    console.log("API lỗi:", err.message);
+  } catch (e) {
+    console.log("Lỗi API:", e.message);
     return [];
   }
 }
@@ -32,134 +48,368 @@ async function getPrintQueue() {
 async function deletePrinted(id) {
   try {
     await axios.post(API_URL, { action: "delete", id });
-    console.log(`Đã xóa job #${id}`);
+    console.log(`🗑 Đã xóa job #${id}`);
     return true;
-  } catch (err) {
-    console.log("Lỗi xoá job:", err.message);
+  } catch (e) {
+    console.log("Lỗi delete:", e.message);
     return false;
   }
 }
 
-/*************************************************************
- * 2) HTML → TEXT → PNG bằng Jimp
- *************************************************************/
-async function htmlToPNG(html, outputFile = "label.png") {
-  console.log("Chuyển HTML → TEXT…");
+// ==============================
+// BỎ DẤU TIẾNG VIỆT
+// ==============================
+function removeDiacritics(str) {
+  const diacriticsMap = {
+    á: "a",
+    à: "a",
+    ả: "a",
+    ã: "a",
+    ạ: "a",
+    ă: "a",
+    ắ: "a",
+    ằ: "a",
+    ẳ: "a",
+    ẵ: "a",
+    ặ: "a",
+    â: "a",
+    ấ: "a",
+    ầ: "a",
+    ẩ: "a",
+    ẫ: "a",
+    ậ: "a",
+    é: "e",
+    è: "e",
+    ẻ: "e",
+    ẽ: "e",
+    ẹ: "e",
+    ê: "e",
+    ế: "e",
+    ề: "e",
+    ể: "e",
+    ễ: "e",
+    ệ: "e",
+    í: "i",
+    ì: "i",
+    ỉ: "i",
+    ĩ: "i",
+    ị: "i",
+    ó: "o",
+    ò: "o",
+    ỏ: "o",
+    õ: "o",
+    ọ: "o",
+    ô: "o",
+    ố: "o",
+    ồ: "o",
+    ổ: "o",
+    ỗ: "o",
+    ộ: "o",
+    ơ: "o",
+    ớ: "o",
+    ờ: "o",
+    ở: "o",
+    ỡ: "o",
+    ợ: "o",
+    ú: "u",
+    ù: "u",
+    ủ: "u",
+    ũ: "u",
+    ụ: "u",
+    ư: "u",
+    ứ: "u",
+    ừ: "u",
+    ử: "u",
+    ữ: "u",
+    ự: "u",
+    ý: "y",
+    ỳ: "y",
+    ỷ: "y",
+    ỹ: "y",
+    ỵ: "y",
+    đ: "d",
+    Á: "A",
+    À: "A",
+    Ả: "A",
+    Ã: "A",
+    Ạ: "A",
+    Ă: "A",
+    Ắ: "A",
+    Ằ: "A",
+    Ẳ: "A",
+    Ẵ: "A",
+    Ặ: "A",
+    Â: "A",
+    Ấ: "A",
+    Ầ: "A",
+    Ẩ: "A",
+    Ẫ: "A",
+    Ậ: "A",
+    É: "E",
+    È: "E",
+    Ẻ: "E",
+    Ẽ: "E",
+    Ẹ: "E",
+    Ê: "E",
+    Ế: "E",
+    Ề: "E",
+    Ể: "E",
+    Ễ: "E",
+    Ệ: "E",
+    Í: "I",
+    Ì: "I",
+    Ỉ: "I",
+    Ĩ: "I",
+    Ị: "I",
+    Ó: "O",
+    Ò: "O",
+    Ỏ: "O",
+    Õ: "O",
+    Ọ: "O",
+    Ô: "O",
+    Ố: "O",
+    Ồ: "O",
+    Ổ: "O",
+    Ỗ: "O",
+    Ộ: "O",
+    Ơ: "O",
+    Ớ: "O",
+    Ờ: "O",
+    Ở: "O",
+    Ỡ: "O",
+    Ợ: "O",
+    Ú: "U",
+    Ù: "U",
+    Ủ: "U",
+    Ũ: "U",
+    Ụ: "U",
+    Ư: "U",
+    Ứ: "U",
+    Ừ: "U",
+    Ử: "U",
+    Ữ: "U",
+    Ự: "U",
+    Ý: "Y",
+    Ỳ: "Y",
+    Ỷ: "Y",
+    Ỹ: "Y",
+    Ỵ: "Y",
+    Đ: "D",
+  };
 
-  let text = htmlToText.convert(html, {
-    wordwrap: 9999,
+  return str
+    .split("")
+    .map((char) => diacriticsMap[char] || char)
+    .join("");
+}
+
+// ==============================
+// FORMAT TEXT - Căn chỉnh giá bên phải
+// ==============================
+function formatBillText(html) {
+  const text = htmlToText.convert(html, {
+    wordwrap: false, // Không wrap tự động
     preserveNewlines: true,
   });
 
-  const font = await Jimp.loadFont(Jimp.FONT_SANS_32_BLACK);
+  let textNoDiacritics = removeDiacritics(text);
 
-  const lines = text.split("\n").map((l) => l.trimEnd());
-  let height = PADDING;
+  // Loại bỏ khoảng trắng thừa
+  textNoDiacritics = textNoDiacritics
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .join("\n");
 
-  // tính chiều cao
-  for (const line of lines) {
-    height += FONT_SIZE + LINE_SPACING;
-  }
-  height += PADDING * 2;
+  const lines = textNoDiacritics.split("\n");
+  const result = [];
+  const MAX_WIDTH = 48; // 48 ký tự cho giấy 80mm
 
-  const img = new Jimp(CANVAS_WIDTH, height, 0xffffffff);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1] ? lines[i + 1].trim() : "";
 
-  let y = PADDING;
+    // Nhận diện tên món + giá
+    if (nextLine.match(/^\d+x[\d.,]+d\s*=\s*[\d.,]+d$/)) {
+      const itemName = line.substring(0, 30); // Tối đa 30 ký tự cho tên
+      const price = nextLine;
 
-  for (const line of lines) {
-    await img.print(font, PADDING, y, line, PRINT_WIDTH);
-    y += FONT_SIZE + LINE_SPACING;
-  }
+      // Căn giá bên phải
+      const padding = MAX_WIDTH - itemName.length - price.length;
+      const spaces = padding > 1 ? " ".repeat(padding) : " ";
 
-  await img.writeAsync(outputFile);
-  console.log("Đã tạo PNG:", outputFile);
+      result.push(itemName + spaces + price);
+      i++; // Bỏ qua dòng giá
+    }
+    // Format giá 2 dòng: "1x50.000d" và "= 50.000d"
+    else if (nextLine.match(/^\d+x[\d.,]+d$/)) {
+      const nextNextLine = lines[i + 2] ? lines[i + 2].trim() : "";
 
-  return outputFile;
-}
+      if (nextNextLine.match(/^=\s*[\d.,]+d$/)) {
+        const itemName = line.substring(0, 30);
+        const combinedPrice = nextLine + " " + nextNextLine;
 
-/*************************************************************
- * 3) PNG → BITMAP → TSPL
- *************************************************************/
-async function printPNG_TSPL(path) {
-  console.log("Xử lý PNG để in TSPL...");
+        const padding = MAX_WIDTH - itemName.length - combinedPrice.length;
+        const spaces = padding > 1 ? " ".repeat(padding) : " ";
 
-  const img = await Jimp.read(path);
-  img.greyscale().contrast(0.4).brightness(0.05);
+        result.push(itemName + spaces + combinedPrice);
+        i += 2;
+      } else {
+        const itemName = line.substring(0, 30);
+        const price = nextLine;
 
-  const width = img.bitmap.width;
-  const height = img.bitmap.height;
+        const padding = MAX_WIDTH - itemName.length - price.length;
+        const spaces = padding > 1 ? " ".repeat(padding) : " ";
 
-  const bytesPerRow = Math.ceil(width / 8);
-  const bitmap = Buffer.alloc(bytesPerRow * height);
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const pixel = img.bitmap.data[idx];
-      if (pixel < 128) {
-        bitmap[y * bytesPerRow + (x >> 3)] |= 0x80 >> x % 8;
+        result.push(itemName + spaces + price);
+        i++;
       }
+    }
+    // TONG CONG - căn giữa
+    else if (line.match(/^TONG CONG$/i)) {
+      result.push("");
+      result.push("CENTER:" + line); // Đánh dấu để căn giữa
+      if (nextLine.match(/^[\d.,]+d$/)) {
+        result.push("CENTER:" + nextLine);
+        i++;
+      }
+    }
+    // Header - căn giữa
+    else if (line.match(/^HOA DON BAN HANG$/i)) {
+      result.push("CENTER:BOLD:" + line);
+    }
+    // Mã đơn - căn giữa
+    else if (line.match(/^#\w+$/)) {
+      result.push("CENTER:" + line);
+    }
+    // Các dòng khác
+    else {
+      result.push(line);
     }
   }
 
-  const heightMM = Math.ceil(height / 8 + 6);
+  return result;
+}
 
-  let tspl =
-    `SIZE 80 mm,${heightMM} mm\r\n` +
-    `GAP 2 mm,0 mm\r\n` +
-    `CLS\r\n` +
-    `BITMAP 0,20,${bytesPerRow},${height},0,`;
+// ==============================
+// IN ESC/POS
+// ==============================
+async function printESCPOS(html) {
+  console.log("🔄 Xử lý và in bill...");
 
-  const header = Buffer.from(tspl, "ascii");
-  const footer = Buffer.from("\r\nPRINT 1\r\n", "ascii");
-  const printData = Buffer.concat([header, bitmap, footer]);
+  const lines = formatBillText(html);
 
-  console.log("Đang gửi lệnh TSPL...");
+  console.log("========== FORMATTED TEXT ==========");
+  lines.forEach((line) => console.log(line));
+  console.log("====================================");
+
+  const buffers = [COMMANDS.INIT];
+
+  for (const line of lines) {
+    // Bỏ qua dòng trống hoàn toàn
+    if (!line || line.trim() === "") {
+      continue; // Không xuống dòng thừa
+    }
+
+    // Xử lý format đặc biệt
+    if (line.startsWith("CENTER:BOLD:")) {
+      const text = line.replace("CENTER:BOLD:", "");
+      buffers.push(
+        COMMANDS.ALIGN_CENTER,
+        COMMANDS.SIZE_DOUBLE,
+        COMMANDS.BOLD_ON,
+        Buffer.from(text + "\n", "ascii"),
+        COMMANDS.BOLD_OFF,
+        COMMANDS.SIZE_NORMAL,
+        COMMANDS.ALIGN_LEFT
+      );
+    } else if (line.startsWith("CENTER:")) {
+      const text = line.replace("CENTER:", "");
+      buffers.push(
+        COMMANDS.ALIGN_CENTER,
+        Buffer.from(text + "\n", "ascii"),
+        COMMANDS.ALIGN_LEFT
+      );
+    } else {
+      buffers.push(Buffer.from(line + "\n", "ascii"));
+    }
+  }
+
+  // Chỉ xuống 2 dòng trước khi cắt giấy
+  // buffers.push(COMMANDS.LINE_FEED, COMMANDS.LINE_FEED, COMMANDS.CUT_PAPER);
+  // Xuống nhiều dòng hơn để tránh cắt mất nội dung
+  buffers.push(
+    COMMANDS.LINE_FEED,
+    COMMANDS.LINE_FEED,
+    COMMANDS.LINE_FEED,
+    COMMANDS.LINE_FEED,
+    COMMANDS.LINE_FEED,
+    COMMANDS.CUT_PAPER
+  );
+  const printData = Buffer.concat(buffers);
+
+  console.log("🖨 Đang gửi lệnh ESC/POS...");
 
   return new Promise((resolve, reject) => {
     const client = new net.Socket();
+
     client.connect(PRINTER_PORT, PRINTER_IP, () => {
       client.write(printData, (err) => {
         if (err) return reject(err);
         client.end();
-        console.log("In thành công!");
+        console.log("✔ In thành công!");
         resolve();
       });
     });
-    client.on("error", reject);
+
+    client.on("error", (err) => {
+      console.log("❌ Lỗi kết nối máy in:", err.message);
+      reject(err);
+    });
+
+    client.on("timeout", () => {
+      console.log("⏱ Timeout kết nối máy in");
+      client.destroy();
+      reject(new Error("Connection timeout"));
+    });
+
+    client.setTimeout(5000);
   });
 }
 
-/*************************************************************
- * 4) WORKER QUEUE
- *************************************************************/
+// ==============================
+// WORKER
+// ==============================
 async function worker() {
   const queue = await getPrintQueue();
   if (!queue.length) return;
 
-  console.log(`Có ${queue.length} job`);
+  console.log(`📦 Có ${queue.length} job mới`);
 
   for (const job of queue) {
-    console.log(`Xử lý job #${job.id}`);
-
-    await deletePrinted(job.id);
-    await sleep(200);
+    console.log(`➡ Xử lý job #${job.id}`);
 
     try {
-      const png = await htmlToPNG(job.html);
-      await printPNG_TSPL(png);
+      await printESCPOS(job.html);
+
+      // Xóa job sau khi in thành công
+      await deletePrinted(job.id);
+      await sleep(200);
     } catch (err) {
-      console.log("Lỗi in:", err.message);
+      console.log("❌ Lỗi in job:", err.message);
     }
   }
 }
 
-/*************************************************************
- * 5) RUN LOOP
- *************************************************************/
-console.log("=== WORKER JIMP + TSPL ===");
-console.log("Printer:", PRINTER_IP);
-console.log("Canvas:", CANVAS_WIDTH);
+// ==============================
+// START
+// ==============================
+(async () => {
+  console.log("🚀 ESC/POS Bill Printer Worker - Starting...");
+  console.log("✅ Worker đang chạy (IN TRỰC TIẾP - BỎ DẤU TIẾNG VIỆT)");
+  console.log(`📡 API: ${API_URL}`);
+  console.log(`🖨 Printer: ${PRINTER_IP}:${PRINTER_PORT}`);
+  console.log("⏱ Polling interval: 2s\n");
 
-worker();
-setInterval(worker, 2000);
+  worker();
+  setInterval(worker, 2000);
+})();
