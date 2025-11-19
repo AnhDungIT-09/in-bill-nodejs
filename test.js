@@ -294,13 +294,7 @@ function formatBillText(html) {
 // IN ESC/POS
 // ==============================
 async function printESCPOS(html) {
-  console.log("🔄 Xử lý và in bill...");
-
   const lines = formatBillText(html);
-
-  console.log("========== FORMATTED TEXT ==========");
-  lines.forEach((line) => console.log(line));
-  console.log("====================================");
 
   const buffers = [COMMANDS.INIT];
 
@@ -404,12 +398,6 @@ async function worker() {
 // START
 // ==============================
 (async () => {
-  console.log("🚀 ESC/POS Bill Printer Worker - Starting...");
-  console.log("✅ Worker đang chạy (IN TRỰC TIẾP - BỎ DẤU TIẾNG VIỆT)");
-  console.log(`📡 API: ${API_URL}`);
-  console.log(`🖨 Printer: ${PRINTER_IP}:${PRINTER_PORT}`);
-  console.log("⏱ Polling interval: 2s\n");
-
   worker();
   setInterval(worker, 2000);
 })();
