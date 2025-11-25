@@ -30,8 +30,8 @@ const COMMANDS = {
   SIZE_NORMAL: Buffer.from([GS, 0x21, 0x00]),
   SIZE_DOUBLE: Buffer.from([GS, 0x21, 0x11]), // 2x chiều rộng và cao
   SIZE_LARGE: Buffer.from([GS, 0x21, 0x22]), // 3x
-  LINE_FEED: Buffer.from([0x0a]), // Xuống dòng
-  CUT_PAPER: Buffer.from([GS, 0x56, 0x00]), // Cắt giấy
+  LINE_FEED: Buffer.from([0x0a]),
+  CUT_PAPER: Buffer.from([GS, 0x56, 0x00]),
 };
 
 async function loadPrinterConfig() {
@@ -63,13 +63,20 @@ async function getPrintQueue() {
   }
 }
 
+// ==============================
+// THAY STATUS (update deletePrinted)
+// ==============================
 async function deletePrinted(id) {
   try {
-    await axios.post(API_URL, { action: "delete", id });
-    console.log(`🗑 Đã xóa job #${id}`);
+    await axios.post(API_URL, {
+      action: "set_status",
+      id,
+      status: "done",
+    });
+    console.log(`🗑 Job #${id} → done`);
     return true;
   } catch (e) {
-    console.log("Lỗi delete:", e.message);
+    console.log("Lỗi set_status:", e.message);
     return false;
   }
 }
@@ -120,15 +127,11 @@ function removeDiacritics(str) {
     ô: "o",
     ố: "o",
     ồ: "o",
-    ổ: "o",
     ỗ: "o",
     ộ: "o",
     ơ: "o",
     ớ: "o",
     ờ: "o",
-    ở: "o",
-    ỡ: "o",
-    ợ: "o",
     ú: "u",
     ù: "u",
     ủ: "u",
@@ -222,17 +225,16 @@ function removeDiacritics(str) {
 }
 
 // ==============================
-// FORMAT TEXT - Căn chỉnh giá bên phải
+// FORMAT TEXT
 // ==============================
 function formatBillText(html) {
   const text = htmlToText.convert(html, {
-    wordwrap: false, // Không wrap tự động
+    wordwrap: false,
     preserveNewlines: true,
   });
 
   let textNoDiacritics = removeDiacritics(text);
 
-  // Loại bỏ khoảng trắng thừa
   textNoDiacritics = textNoDiacritics
     .split("\n")
     .map((line) => line.replace(/\s+/g, " ").trim())
@@ -240,26 +242,22 @@ function formatBillText(html) {
 
   const lines = textNoDiacritics.split("\n");
   const result = [];
-  const MAX_WIDTH = 48; // 48 ký tự cho giấy 80mm
+  const MAX_WIDTH = 48;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const nextLine = lines[i + 1] ? lines[i + 1].trim() : "";
 
-    // Nhận diện tên món + giá
     if (nextLine.match(/^\d+x[\d.,]+d\s*=\s*[\d.,]+d$/)) {
-      const itemName = line.substring(0, 30); // Tối đa 30 ký tự cho tên
+      const itemName = line.substring(0, 30);
       const price = nextLine;
 
-      // Căn giá bên phải
       const padding = MAX_WIDTH - itemName.length - price.length;
       const spaces = padding > 1 ? " ".repeat(padding) : " ";
 
       result.push(itemName + spaces + price);
-      i++; // Bỏ qua dòng giá
-    }
-    // Format giá 2 dòng: "1x50.000d" và "= 50.000d"
-    else if (nextLine.match(/^\d+x[\d.,]+d$/)) {
+      i++;
+    } else if (nextLine.match(/^\d+x[\d.,]+d$/)) {
       const nextNextLine = lines[i + 2] ? lines[i + 2].trim() : "";
 
       if (nextNextLine.match(/^=\s*[\d.,]+d$/)) {
@@ -281,26 +279,18 @@ function formatBillText(html) {
         result.push(itemName + spaces + price);
         i++;
       }
-    }
-    // TONG CONG - căn giữa
-    else if (line.match(/^TONG CONG$/i)) {
+    } else if (line.match(/^TONG CONG$/i)) {
       result.push("");
-      result.push("CENTER:" + line); // Đánh dấu để căn giữa
+      result.push("CENTER:" + line);
       if (nextLine.match(/^[\d.,]+d$/)) {
         result.push("CENTER:" + nextLine);
         i++;
       }
-    }
-    // Header - căn giữa
-    else if (line.match(/^HOA DON BAN HANG$/i)) {
+    } else if (line.match(/^HOA DON BAN HANG$/i)) {
       result.push("CENTER:BOLD:" + line);
-    }
-    // Mã đơn - căn giữa
-    else if (line.match(/^#\w+$/)) {
+    } else if (line.match(/^#\w+$/)) {
       result.push("CENTER:" + line);
-    }
-    // Các dòng khác
-    else {
+    } else {
       result.push(line);
     }
   }
@@ -309,7 +299,7 @@ function formatBillText(html) {
 }
 
 // ==============================
-// IN ESC/POS
+// IN ESC/POS GIỮ NGUYÊN
 // ==============================
 async function printESCPOS(html, ip, port) {
   const lines = formatBillText(html);
@@ -317,12 +307,8 @@ async function printESCPOS(html, ip, port) {
   const buffers = [COMMANDS.INIT];
 
   for (const line of lines) {
-    // Bỏ qua dòng trống hoàn toàn
-    if (!line || line.trim() === "") {
-      continue; // Không xuống dòng thừa
-    }
+    if (!line || line.trim() === "") continue;
 
-    // Xử lý format đặc biệt
     if (line.startsWith("CENTER:BOLD:")) {
       const text = line.replace("CENTER:BOLD:", "");
       buffers.push(
@@ -346,9 +332,6 @@ async function printESCPOS(html, ip, port) {
     }
   }
 
-  // Chỉ xuống 2 dòng trước khi cắt giấy
-  // buffers.push(COMMANDS.LINE_FEED, COMMANDS.LINE_FEED, COMMANDS.CUT_PAPER);
-  // Xuống nhiều dòng hơn để tránh cắt mất nội dung
   buffers.push(
     COMMANDS.LINE_FEED,
     COMMANDS.LINE_FEED,
@@ -357,9 +340,10 @@ async function printESCPOS(html, ip, port) {
     COMMANDS.LINE_FEED,
     COMMANDS.CUT_PAPER
   );
+
   const printData = Buffer.concat(buffers);
 
-  console.log("🖨 Đang gửi lệnh ESC/POS...");
+  console.log("🖨 Đang gửi ESC/POS raw...");
 
   return new Promise((resolve, reject) => {
     const client = new net.Socket();
@@ -374,22 +358,21 @@ async function printESCPOS(html, ip, port) {
     });
 
     client.on("error", (err) => {
-      console.log("❌ Lỗi kết nối máy in:", err.message);
+      console.log("❌ Lỗi máy in:", err.message);
       reject(err);
     });
 
-    client.on("timeout", () => {
-      console.log("⏱ Timeout kết nối máy in");
-      client.destroy();
-      reject(new Error("Connection timeout"));
-    });
-
     client.setTimeout(5000);
+    client.on("timeout", () => {
+      console.log("⏱ Timeout");
+      client.destroy();
+      reject(new Error("timeout"));
+    });
   });
 }
 
 // ==============================
-// WORKER
+// WORKER — CHỈ SỬA STATUS
 // ==============================
 async function worker() {
   const queue = await getPrintQueue();
@@ -399,16 +382,35 @@ async function worker() {
   const { ip, port } = await loadPrinterConfig();
 
   for (const job of queue) {
-    console.log(`➡ Xử lý job #${job.id}`);
+    console.log(`➡ Job #${job.id}`);
 
     try {
-      await printESCPOS(job.html, ip, port);
+      // ====== STATUS: PRINTING ======
+      await axios.post(API_URL, {
+        action: "set_status",
+        id: job.id,
+        status: "printing",
+      });
 
-      // Xóa job sau khi in thành công
-      await deletePrinted(job.id);
+      await printESCPOS(job.html, "118.71.138.106", port);
+
+      // ====== STATUS: DONE ======
+      await axios.post(API_URL, {
+        action: "set_status",
+        id: job.id,
+        status: "done",
+      });
+
       await sleep(200);
     } catch (err) {
       console.log("❌ Lỗi in job:", err.message);
+
+      // ====== STATUS: PENDING (thử lại) ======
+      await axios.post(API_URL, {
+        action: "set_status",
+        id: job.id,
+        status: "pending",
+      });
     }
   }
 }

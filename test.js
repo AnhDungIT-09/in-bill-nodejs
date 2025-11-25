@@ -169,7 +169,7 @@ async function worker() {
   for (const job of jobs) {
     console.log(`➡ Job #${job.id}: Bắt đầu`);
     try {
-      await updateStatus(job.id, "processing");
+      await updateStatus(job.id, "printing");
 
       const pngBuffer = await renderHTMLtoPNG(job.html);
       if (!pngBuffer) throw new Error("Render thất bại");
