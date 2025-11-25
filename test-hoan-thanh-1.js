@@ -392,7 +392,7 @@ async function worker() {
         status: "printing",
       });
 
-      await printESCPOS(job.html, "fnbphuc.ddns.net", "9100");
+      await printESCPOS(job.html, "fnbphuc.ddns.net", port);
 
       // ====== STATUS: DONE ======
       await axios.post(API_URL, {
