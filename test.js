@@ -1,23 +1,19 @@
 const axios = require("axios");
 const escpos = require("escpos");
 escpos.Network = require("escpos-network");
-const Jimp = require("jimp"); // Đổi từ sharp sang jimp
+const Jimp = require("jimp");
 
-// ==============================
-// CONFIG
-// ==============================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
 const API_URL_SETTING =
   "https://dinhdungit.click/BackEndZaloFnB/api/in/setting.php";
 const RENDER_URL = "https://dinhdungit.click/BackEndZaloFnB/renderNodejs";
 
 const PRINTER_WIDTH = 576;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ==============================
-// GET PRINTER CONFIG
-// ==============================
+/* ============================================================
+   LOAD PRINTER CONFIG
+============================================================ */
 async function loadPrinterConfig() {
   try {
     const res = await axios.post(API_URL_SETTING, { action: "get_printer" });
@@ -33,19 +29,21 @@ async function loadPrinterConfig() {
   return { ip: "192.168.1.250", port: 9100 };
 }
 
-// ==============================
-// QUEUE API
-// ==============================
-async function getPendingJobs() {
+/* ============================================================
+   GET NEXT JOB (LOCKED)
+============================================================ */
+async function getNextJob() {
   try {
-    const res = await axios.post(API_URL, { action: "get_all" });
-    return res.data.data || [];
-  } catch (e) {
-    // console.log("❌ Lỗi API queue:", e.message);
-    return [];
+    const res = await axios.post(API_URL, { action: "get_next_job" });
+    return res.data.data || null;
+  } catch {
+    return null;
   }
 }
 
+/* ============================================================
+   UPDATE STATUS
+============================================================ */
 async function updateStatus(id, status) {
   try {
     await axios.post(API_URL, { action: "set_status", id, status });
@@ -55,17 +53,17 @@ async function updateStatus(id, status) {
   }
 }
 
-// ==============================
-// RENDER HTML → PNG buffer
-// ==============================
+/* ============================================================
+   RENDER HTML TO PNG
+============================================================ */
 async function renderHTMLtoPNG(html) {
   try {
-    console.log("🔄 Đang render HTML...");
     const res = await axios.post(
       RENDER_URL,
       { html, width: PRINTER_WIDTH },
       { responseType: "arraybuffer", timeout: 30000 }
     );
+
     if (!res.data || res.data.byteLength === 0) return null;
     return Buffer.from(res.data);
   } catch (e) {
@@ -74,32 +72,23 @@ async function renderHTMLtoPNG(html) {
   }
 }
 
-// ==============================
-// 🛠️ XỬ LÝ ẢNH (DÙNG JIMP)
-// ==============================
+/* ============================================================
+   PREPARE RASTER USING JIMP
+============================================================ */
 async function prepareRasterData(pngBuffer) {
-  // Đọc ảnh bằng Jimp
   const image = await Jimp.read(pngBuffer);
 
-  // Resize về đúng khổ giấy và chuyển sang đen trắng
   image.resize(PRINTER_WIDTH, Jimp.AUTO).greyscale();
 
   const width = image.bitmap.width;
   const height = image.bitmap.height;
 
-  // Bit Packing
   const bytesPerRow = Math.ceil(width / 8);
   const raster = Buffer.alloc(bytesPerRow * height);
   raster.fill(0);
 
-  // Jimp lưu pixel dạng RGBA liên tiếp [R, G, B, A, R, G, B, A...]
-  // Vì đã greyscale nên R=G=B. Ta chỉ cần lấy giá trị R.
-
   image.scan(0, 0, width, height, function (x, y, idx) {
-    // idx là vị trí bắt đầu của pixel trong buffer (gồm 4 byte RGBA)
-    const red = this.bitmap.data[idx]; // Lấy giá trị màu (0-255)
-
-    // Threshold thủ công: < 170 là đen (in), > 170 là trắng
+    const red = this.bitmap.data[idx];
     if (red < 170) {
       raster[y * bytesPerRow + (x >> 3)] |= 0x80 >> (x & 7);
     }
@@ -108,23 +97,18 @@ async function prepareRasterData(pngBuffer) {
   return { raster, width, height, bytesPerRow };
 }
 
-// ==============================
-// 🖨️ GỬI LỆNH RAW
-// ==============================
+/* ============================================================
+   PRINT RAW
+============================================================ */
 async function printRaw(ip, port, rasterData) {
   return new Promise((resolve, reject) => {
-    const { raster, width, height, bytesPerRow } = rasterData;
+    const { raster, height, bytesPerRow } = rasterData;
 
     const device = new escpos.Network(ip, port);
     const printer = new escpos.Printer(device);
 
     device.open((err) => {
-      if (err) {
-        console.log(`❌ Không kết nối được máy in ${ip}:`, err.message);
-        return reject(err);
-      }
-
-      console.log(`🖨 Đang gửi lệnh in...`);
+      if (err) return reject(err);
 
       try {
         const header = Buffer.from([
@@ -147,52 +131,58 @@ async function printRaw(ip, port, rasterData) {
         setTimeout(() => {
           printer.close();
           resolve(true);
-        }, 1000);
-      } catch (printErr) {
+        }, 800);
+      } catch (e) {
         printer.close();
-        reject(printErr);
+        reject(e);
       }
     });
   });
 }
 
-// ==============================
-// WORKER
-// ==============================
-async function worker() {
-  const jobs = await getPendingJobs();
-  if (!jobs.length) return;
+/* ============================================================
+   WORKER
+============================================================ */
 
-  console.log(`📦 Có ${jobs.length} job cần xử lý`);
+let isRunning = false;
+
+async function worker() {
+  if (isRunning) return;
+  isRunning = true;
+
+  const job = await getNextJob();
+  if (!job) {
+    isRunning = false;
+    return;
+  }
+
+  console.log(`➡ Job #${job.id}: Bắt đầu`);
+
   const { ip, port } = await loadPrinterConfig();
 
-  for (const job of jobs) {
-    console.log(`➡ Job #${job.id}: Bắt đầu`);
-    try {
-      await updateStatus(job.id, "printing");
+  try {
+    const pngBuffer = await renderHTMLtoPNG(job.html);
+    if (!pngBuffer) throw new Error("Render thất bại");
 
-      const pngBuffer = await renderHTMLtoPNG(job.html);
-      if (!pngBuffer) throw new Error("Render thất bại");
+    const rasterData = await prepareRasterData(pngBuffer);
 
-      const rasterData = await prepareRasterData(pngBuffer);
+    await printRaw(ip, port, rasterData);
 
-      await printRaw(ip, port, rasterData);
-
-      console.log(`✅ Job #${job.id}: Hoàn thành`);
-      await updateStatus(job.id, "done");
-    } catch (e) {
-      console.log(`❌ Job #${job.id} thất bại:`, e.message);
-      await updateStatus(job.id, "pending");
-    }
-    await sleep(500);
+    await updateStatus(job.id, "done");
+    console.log(`✅ Job #${job.id}: Hoàn thành`);
+  } catch (e) {
+    console.log(`❌ Job #${job.id} thất bại:`, e.message);
+    await updateStatus(job.id, "pending");
   }
+
+  isRunning = false;
 }
 
-// ==============================
-// START
-// ==============================
+/* ============================================================
+   START
+============================================================ */
 (async () => {
   console.log("🚀 Worker (Jimp Version) đang chạy trên Android...");
   worker();
-  setInterval(worker, 5000);
+  setInterval(worker, 1000);
 })();
