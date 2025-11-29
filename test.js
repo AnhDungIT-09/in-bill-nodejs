@@ -10,10 +10,9 @@ const API_URL_SETTING =
   "https://dinhdungit.click/BackEndZaloFnB/api/in/setting.php";
 const RENDER_URL = "https://dinhdungit.click/BackEndZaloFnB/renderNodejs";
 
-// --- CẤU HÌNH PUSHER (Thay Key của bạn vào đây) ---
+// --- CẤU HÌNH PUSHER ---
 const PUSHER_APP_KEY = "ff686e90b89e218ad92b";
 const PUSHER_CLUSTER = "ap1";
-// --------------------------------------------------
 
 const PRINTER_WIDTH = 576;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,7 +32,6 @@ async function loadPrinterConfig() {
   } catch (e) {
     console.log("❌ Lỗi load máy in:", e.message);
   }
-  // IP mặc định nếu không load được từ API
   return { ip: "192.168.1.250", port: 9100 };
 }
 
@@ -55,7 +53,6 @@ async function getNextJob() {
 async function updateStatus(id, status) {
   try {
     await axios.post(API_URL, { action: "set_status", id, status });
-    console.log(`⚙️ Job #${id} → ${status}`);
   } catch (e) {
     console.log(`❌ Lỗi update status job #${id}:`, e.message);
   }
@@ -66,11 +63,14 @@ async function updateStatus(id, status) {
 ============================================================ */
 async function renderHTMLtoPNG(html) {
   try {
+    // Đo thời gian gọi Server Render
+    console.time("⏱️ Thời gian tải ảnh từ Server");
     const res = await axios.post(
       RENDER_URL,
       { html, width: PRINTER_WIDTH },
       { responseType: "arraybuffer", timeout: 30000 }
     );
+    console.timeEnd("⏱️ Thời gian tải ảnh từ Server");
 
     if (!res.data || res.data.byteLength === 0) return null;
     return Buffer.from(res.data);
@@ -84,6 +84,8 @@ async function renderHTMLtoPNG(html) {
    5. PREPARE RASTER (JIMP)
 ============================================================ */
 async function prepareRasterData(pngBuffer) {
+  // Đo thời gian xử lý ảnh trên điện thoại
+  console.time("⏱️ Thời gian xử lý ảnh (Jimp)");
   const image = await Jimp.read(pngBuffer);
 
   image.resize(PRINTER_WIDTH, Jimp.AUTO).greyscale();
@@ -101,6 +103,7 @@ async function prepareRasterData(pngBuffer) {
       raster[y * bytesPerRow + (x >> 3)] |= 0x80 >> (x & 7);
     }
   });
+  console.timeEnd("⏱️ Thời gian xử lý ảnh (Jimp)");
 
   return { raster, width, height, bytesPerRow };
 }
@@ -119,6 +122,7 @@ async function printRaw(ip, port, rasterData) {
       if (err) return reject(err);
 
       try {
+        console.time("⏱️ Thời gian gửi lệnh in");
         const header = Buffer.from([
           0x1d,
           0x76,
@@ -138,6 +142,7 @@ async function printRaw(ip, port, rasterData) {
 
         setTimeout(() => {
           printer.close();
+          console.timeEnd("⏱️ Thời gian gửi lệnh in");
           resolve(true);
         }, 800);
       } catch (e) {
@@ -149,116 +154,81 @@ async function printRaw(ip, port, rasterData) {
 }
 
 /* ============================================================
-   7. WORKER - LOGIC XỬ LÝ THÔNG MINH
+   7. WORKER
 ============================================================ */
 let isRunning = false;
-let hasPendingRun = false; // Cờ nhớ: Có lệnh in mới khi đang bận
+let hasPendingRun = false;
 
 async function worker(triggeredBy = "interval") {
-  // 1. Nếu được gọi từ Pusher, đánh dấu có việc cần làm
   if (triggeredBy === "pusher") {
     hasPendingRun = true;
     console.log("🔔 Kích hoạt in từ Pusher!");
   }
 
-  // 2. Nếu đang chạy, không làm phiền, nhưng cờ hasPendingRun đã được bật
   if (isRunning) {
-    if (triggeredBy === "pusher") {
-      console.log(
-        "⚠️ Worker đang bận, đã xếp hàng đợi xử lý ngay sau job này."
-      );
-    }
+    if (triggeredBy === "pusher") console.log("⚠️ Worker bận, xếp hàng...");
     return;
   }
 
   isRunning = true;
 
   try {
-    // 3. Vòng lặp Do-While: Đảm bảo xử lý hết sạch việc kể cả việc mới đến
     do {
-      hasPendingRun = false; // Reset cờ trước khi bắt đầu quét
-
-      // Vòng lặp quét sạch DB
+      hasPendingRun = false;
       while (true) {
         const job = await getNextJob();
-        if (!job) break; // Hết việc trong DB thì thoát vòng while nhỏ
+        if (!job) break;
 
-        console.log(`➡ Job #${job.id}: Bắt đầu xử lý...`);
+        console.log(`\n➡ Job #${job.id}: Bắt đầu xử lý...`);
         const { ip, port } = await loadPrinterConfig();
 
-        // A. Render ảnh
+        // Bước 1: Render
         const pngBuffer = await renderHTMLtoPNG(job.html);
         if (!pngBuffer) {
-          console.log("❌ Render thất bại, đánh dấu lỗi.");
-          // Update status error để không bị lặp lại mãi job lỗi này
           await updateStatus(job.id, "error");
-          continue; // Chuyển sang job tiếp theo
+          continue;
         }
 
-        // B. In ấn
+        // Bước 2: Xử lý ảnh & In
         try {
           const rasterData = await prepareRasterData(pngBuffer);
           await printRaw(ip, port, rasterData);
           await updateStatus(job.id, "done");
-          console.log(`✅ Job #${job.id}: Hoàn thành`);
+          console.log(`✅ Job #${job.id}: Hoàn thành\n`);
         } catch (errPrint) {
-          console.log(
-            `❌ Lỗi kết nối máy in (${ip}:${port}):`,
-            errPrint.message
-          );
-          // Nếu lỗi kết nối máy in, thoát vòng while để retry sau (giữ status pending)
+          console.log(`❌ Lỗi in:`, errPrint.message);
           break;
         }
       }
-
-      // Nếu trong lúc đang in ở trên mà Pusher bắn tin tới,
-      // hasPendingRun sẽ lại thành true -> Vòng do-while lặp lại ngay lập tức.
     } while (hasPendingRun);
   } catch (e) {
-    console.log(`❌ Lỗi Worker không mong muốn:`, e.message);
+    console.log(`❌ Lỗi Worker:`, e.message);
   }
 
   isRunning = false;
 }
 
 /* ============================================================
-   8. KHỞI ĐỘNG HỆ THỐNG
+   8. START
 ============================================================ */
 (async () => {
-  console.log("🚀 Print Server (Pusher Optimized) đang chạy...");
+  console.log("🚀 Print Server (Benchmark Version) đang chạy...");
 
-  // A. Kết nối Pusher
-  const pusher = new Pusher(PUSHER_APP_KEY, {
-    cluster: PUSHER_CLUSTER,
-  });
+  const pusher = new Pusher(PUSHER_APP_KEY, { cluster: PUSHER_CLUSTER });
 
-  // --- THÊM PHẦN LOG TRẠNG THÁI KẾT NỐI ---
-  pusher.connection.bind("connected", () => {
-    console.log("✅ PUSHER: Đã kết nối thành công tới Server!");
-  });
-  pusher.connection.bind("disconnected", () => {
-    console.log("⚠️ PUSHER: Mất kết nối! Đang thử lại...");
-  });
-  pusher.connection.bind("error", (err) => {
-    console.log("❌ PUSHER: Lỗi kết nối:", err.error ? err.error.data : err);
-  });
-  // ----------------------------------------
+  pusher.connection.bind("connected", () =>
+    console.log("✅ PUSHER: Connected!")
+  );
+  pusher.connection.bind("error", (err) =>
+    console.log("❌ PUSHER Error:", err)
+  );
 
   const channel = pusher.subscribe("print_channel");
-
-  // B. Lắng nghe sự kiện
   channel.bind("new_print_job", function (data) {
-    console.log(`⚡ Nhận tín hiệu Pusher: Job ID ${data.id}`);
-
-    // Quan trọng: Delay 500ms để đảm bảo PHP đã Commit dữ liệu vào DB xong
-    setTimeout(() => {
-      worker("pusher");
-    }, 500);
+    console.log(`⚡ Pusher Event: Job ID ${data.id}`);
+    setTimeout(() => worker("pusher"), 500);
   });
 
-  // C. Chạy quét lần đầu
   worker("init");
-
-  // D. Cơ chế Backup: 5 giây quét 1 lần phòng hờ rớt mạng Pusher
   setInterval(() => worker("interval"), 5000);
 })();
