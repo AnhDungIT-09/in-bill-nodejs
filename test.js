@@ -6,8 +6,7 @@ const Pusher = require("pusher-js");
 
 // ================= CẤU HÌNH HỆ THỐNG =================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-const API_URL_SETTING =
-  "https://dinhdungit.click/BackEndZaloFnB/api/in/setting.php";
+// const API_URL_SETTING = ... (Đã bỏ vì không cần nữa)
 const RENDER_URL = "https://dinhdungit.click/BackEndZaloFnB/renderNodejs";
 
 // --- CẤU HÌNH PUSHER ---
@@ -18,37 +17,21 @@ const PRINTER_WIDTH = 576;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ============================================================
-   1. LOAD PRINTER CONFIG
-============================================================ */
-async function loadPrinterConfig() {
-  try {
-    const res = await axios.post(API_URL_SETTING, { action: "get_printer" });
-    if (res.data.success && res.data.data) {
-      return {
-        ip: res.data.data.ip,
-        port: parseInt(res.data.data.port, 10),
-      };
-    }
-  } catch (e) {
-    console.log("❌ Lỗi load máy in:", e.message);
-  }
-  return { ip: "192.168.1.250", port: 9100 };
-}
-
-/* ============================================================
-   2. GET NEXT JOB
+   1. GET NEXT JOB (Lấy job kèm IP và Port từ DB)
 ============================================================ */
 async function getNextJob() {
   try {
     const res = await axios.post(API_URL, { action: "get_next_job" });
+    // Dữ liệu trả về sẽ có dạng: { id, html, ip_may_in, port_may_in, ... }
     return res.data.data || null;
-  } catch {
+  } catch (e) {
+    // console.log("Lỗi get job:", e.message); // Có thể ẩn log này để đỡ rối
     return null;
   }
 }
 
 /* ============================================================
-   3. UPDATE STATUS
+   2. UPDATE STATUS
 ============================================================ */
 async function updateStatus(id, status) {
   try {
@@ -59,11 +42,10 @@ async function updateStatus(id, status) {
 }
 
 /* ============================================================
-   4. RENDER HTML TO PNG
+   3. RENDER HTML TO PNG
 ============================================================ */
 async function renderHTMLtoPNG(html) {
   try {
-    // Đo thời gian gọi Server Render
     console.time("⏱️ Thời gian tải ảnh từ Server");
     const res = await axios.post(
       RENDER_URL,
@@ -81,10 +63,9 @@ async function renderHTMLtoPNG(html) {
 }
 
 /* ============================================================
-   5. PREPARE RASTER (JIMP)
+   4. PREPARE RASTER (JIMP)
 ============================================================ */
 async function prepareRasterData(pngBuffer) {
-  // Đo thời gian xử lý ảnh trên điện thoại
   console.time("⏱️ Thời gian xử lý ảnh (Jimp)");
   const image = await Jimp.read(pngBuffer);
 
@@ -109,12 +90,13 @@ async function prepareRasterData(pngBuffer) {
 }
 
 /* ============================================================
-   6. PRINT RAW (ESC/POS)
+   5. PRINT RAW (ESC/POS)
 ============================================================ */
 async function printRaw(ip, port, rasterData) {
   return new Promise((resolve, reject) => {
     const { raster, height, bytesPerRow } = rasterData;
 
+    console.log(`🖨️ Đang kết nối tới máy in: ${ip}:${port}`);
     const device = new escpos.Network(ip, port);
     const printer = new escpos.Printer(device);
 
@@ -154,7 +136,7 @@ async function printRaw(ip, port, rasterData) {
 }
 
 /* ============================================================
-   7. WORKER
+   6. WORKER
 ============================================================ */
 let isRunning = false;
 let hasPendingRun = false;
@@ -180,7 +162,18 @@ async function worker(triggeredBy = "interval") {
         if (!job) break;
 
         console.log(`\n➡ Job #${job.id}: Bắt đầu xử lý...`);
-        const { ip, port } = await loadPrinterConfig();
+
+        // --- [SỬA ĐỔI QUAN TRỌNG] ---
+        // Lấy IP và Port trực tiếp từ Job (Backend đã lưu sẵn)
+        const printerIP = job.ip_may_in;
+        const printerPort = job.port_may_in ? parseInt(job.port_may_in) : 9100;
+
+        if (!printerIP) {
+          console.log(`❌ Job #${job.id} bị lỗi: Không có địa chỉ IP máy in!`);
+          await updateStatus(job.id, "error"); // Đánh dấu lỗi để không bị lặp
+          continue;
+        }
+        // -----------------------------
 
         // Bước 1: Render
         const pngBuffer = await renderHTMLtoPNG(job.html);
@@ -192,12 +185,15 @@ async function worker(triggeredBy = "interval") {
         // Bước 2: Xử lý ảnh & In
         try {
           const rasterData = await prepareRasterData(pngBuffer);
-          await printRaw(ip, port, rasterData);
+          // Truyền IP/Port lấy từ job vào hàm in
+          await printRaw(printerIP, printerPort, rasterData);
           await updateStatus(job.id, "done");
           console.log(`✅ Job #${job.id}: Hoàn thành\n`);
         } catch (errPrint) {
-          console.log(`❌ Lỗi in:`, errPrint.message);
-          break;
+          console.log(`❌ Lỗi in (Job #${job.id}):`, errPrint.message);
+          // Tùy chọn: Có thể set status là 'pending' để thử lại sau, hoặc 'error' để bỏ qua
+          await updateStatus(job.id, "error");
+          break; // Break để chờ một chút trước khi thử lại vòng lặp
         }
       }
     } while (hasPendingRun);
@@ -209,10 +205,10 @@ async function worker(triggeredBy = "interval") {
 }
 
 /* ============================================================
-   8. START
+   7. START
 ============================================================ */
 (async () => {
-  console.log("🚀 Print Server (Benchmark Version) đang chạy...");
+  console.log("🚀 Print Server (Smart Routing Version) đang chạy...");
 
   const pusher = new Pusher(PUSHER_APP_KEY, { cluster: PUSHER_CLUSTER });
 
@@ -225,6 +221,8 @@ async function worker(triggeredBy = "interval") {
 
   const channel = pusher.subscribe("print_channel");
   channel.bind("new_print_job", function (data) {
+    // Data trả về từ Pusher bây giờ cũng có thể chứa target ip nếu cần dùng ngay
+    // console.log(`⚡ Pusher Event: Job ID ${data.id}`, data.target);
     console.log(`⚡ Pusher Event: Job ID ${data.id}`);
     setTimeout(() => worker("pusher"), 500);
   });
