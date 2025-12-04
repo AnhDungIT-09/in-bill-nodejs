@@ -3,10 +3,27 @@ const escpos = require("escpos");
 escpos.Network = require("escpos-network");
 const Jimp = require("jimp");
 const Pusher = require("pusher-js");
+const net = require("net"); // [MỚI] Thư viện để check kết nối TCP
+
+// ================= CẤU HÌNH ID CHI NHÁNH =================
+const args = process.argv.slice(2);
+const BRANCH_ID = args[0];
+const VALID_IDS = [11, 12, 13, 14, 15, 16, 17, 18, 19];
+
+if (!BRANCH_ID) {
+  console.error("\n❌ LỖI: Bạn chưa nhập ID chi nhánh!");
+  console.error("👉 Danh sách ID hợp lệ: " + VALID_IDS.join(", "));
+  console.error("👉 Cách chạy: node index.js <ID>");
+  process.exit(1);
+}
+
+console.log(`\n=========================================`);
+console.log(`🚀 KHỞI ĐỘNG PRINT SERVER`);
+console.log(`🏠 CHI NHÁNH ID: ${BRANCH_ID}`);
+console.log(`=========================================\n`);
 
 // ================= CẤU HÌNH HỆ THỐNG =================
 const API_URL = "https://dinhdungit.click/BackEndZaloFnB/api/in/in.php";
-// const API_URL_SETTING = ... (Đã bỏ vì không cần nữa)
 const RENDER_URL = "https://dinhdungit.click/BackEndZaloFnB/renderNodejs";
 
 // --- CẤU HÌNH PUSHER ---
@@ -17,15 +34,46 @@ const PRINTER_WIDTH = 576;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ============================================================
-   1. GET NEXT JOB (Lấy job kèm IP và Port từ DB)
+   HÀM MỚI: KIỂM TRA KẾT NỐI MÁY IN (PING)
+============================================================ */
+function checkPrinterConnection(ip, port, timeout = 3000) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    let status = false;
+
+    socket.setTimeout(timeout);
+
+    socket.on("connect", () => {
+      status = true;
+      socket.destroy(); // Đóng kết nối ngay vì chỉ cần biết là thông
+      resolve(true);
+    });
+
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error("Timeout (Quá thời gian chờ)"));
+    });
+
+    socket.on("error", (err) => {
+      socket.destroy();
+      reject(err);
+    });
+
+    socket.connect(port, ip);
+  });
+}
+
+/* ============================================================
+   1. GET NEXT JOB
 ============================================================ */
 async function getNextJob() {
   try {
-    const res = await axios.post(API_URL, { action: "get_next_job" });
-    // Dữ liệu trả về sẽ có dạng: { id, html, ip_may_in, port_may_in, ... }
+    const res = await axios.post(API_URL, {
+      action: "get_next_job",
+      branch_id: BRANCH_ID,
+    });
     return res.data.data || null;
   } catch (e) {
-    // console.log("Lỗi get job:", e.message); // Có thể ẩn log này để đỡ rối
     return null;
   }
 }
@@ -46,13 +94,13 @@ async function updateStatus(id, status) {
 ============================================================ */
 async function renderHTMLtoPNG(html) {
   try {
-    console.time("⏱️ Thời gian tải ảnh từ Server");
+    console.time("⏱️ Thời gian tải ảnh");
     const res = await axios.post(
       RENDER_URL,
       { html, width: PRINTER_WIDTH },
       { responseType: "arraybuffer", timeout: 30000 }
     );
-    console.timeEnd("⏱️ Thời gian tải ảnh từ Server");
+    console.timeEnd("⏱️ Thời gian tải ảnh");
 
     if (!res.data || res.data.byteLength === 0) return null;
     return Buffer.from(res.data);
@@ -66,7 +114,7 @@ async function renderHTMLtoPNG(html) {
    4. PREPARE RASTER (JIMP)
 ============================================================ */
 async function prepareRasterData(pngBuffer) {
-  console.time("⏱️ Thời gian xử lý ảnh (Jimp)");
+  console.time("⏱️ Thời gian xử lý ảnh");
   const image = await Jimp.read(pngBuffer);
 
   image.resize(PRINTER_WIDTH, Jimp.AUTO).greyscale();
@@ -84,7 +132,7 @@ async function prepareRasterData(pngBuffer) {
       raster[y * bytesPerRow + (x >> 3)] |= 0x80 >> (x & 7);
     }
   });
-  console.timeEnd("⏱️ Thời gian xử lý ảnh (Jimp)");
+  console.timeEnd("⏱️ Thời gian xử lý ảnh");
 
   return { raster, width, height, bytesPerRow };
 }
@@ -96,7 +144,7 @@ async function printRaw(ip, port, rasterData) {
   return new Promise((resolve, reject) => {
     const { raster, height, bytesPerRow } = rasterData;
 
-    console.log(`🖨️ Đang kết nối tới máy in: ${ip}:${port}`);
+    console.log(`🖨️ Đang gửi lệnh in tới: ${ip}:${port}`);
     const device = new escpos.Network(ip, port);
     const printer = new escpos.Printer(device);
 
@@ -104,8 +152,9 @@ async function printRaw(ip, port, rasterData) {
       if (err) return reject(err);
 
       try {
-        console.time("⏱️ Thời gian gửi lệnh in");
-        const header = Buffer.from([
+        console.time("⏱️ Thời gian in");
+        // Header chuẩn ESC/POS cho in raster bit image (GS v 0)
+        const rasterHeader = Buffer.from([
           0x1d,
           0x76,
           0x30,
@@ -117,14 +166,14 @@ async function printRaw(ip, port, rasterData) {
         ]);
 
         printer.align("ct");
-        printer.raw(Buffer.concat([header, raster]));
+        printer.raw(Buffer.concat([rasterHeader, raster]));
         printer.newLine();
         printer.newLine();
         printer.cut();
 
         setTimeout(() => {
           printer.close();
-          console.timeEnd("⏱️ Thời gian gửi lệnh in");
+          console.timeEnd("⏱️ Thời gian in");
           resolve(true);
         }, 800);
       } catch (e) {
@@ -144,11 +193,11 @@ let hasPendingRun = false;
 async function worker(triggeredBy = "interval") {
   if (triggeredBy === "pusher") {
     hasPendingRun = true;
-    console.log("🔔 Kích hoạt in từ Pusher!");
+    console.log("🔔 Kích hoạt từ Pusher!");
   }
 
   if (isRunning) {
-    if (triggeredBy === "pusher") console.log("⚠️ Worker bận, xếp hàng...");
+    if (triggeredBy === "pusher") console.log("⚠️ Worker bận, đã xếp hàng...");
     return;
   }
 
@@ -159,25 +208,42 @@ async function worker(triggeredBy = "interval") {
       hasPendingRun = false;
       while (true) {
         const job = await getNextJob();
-        if (!job) break;
+        if (!job) break; // Hết việc
 
-        console.log(`\n➡ Job #${job.id}: Bắt đầu xử lý...`);
+        console.log(`\n➡ Job #${job.id}: Đã nhận. IP: ${job.ip_may_in}`);
 
-        // --- [SỬA ĐỔI QUAN TRỌNG] ---
-        // Lấy IP và Port trực tiếp từ Job (Backend đã lưu sẵn)
         const printerIP = job.ip_may_in;
         const printerPort = job.port_may_in ? parseInt(job.port_may_in) : 9100;
 
         if (!printerIP) {
-          console.log(`❌ Job #${job.id} bị lỗi: Không có địa chỉ IP máy in!`);
-          await updateStatus(job.id, "error"); // Đánh dấu lỗi để không bị lặp
+          console.log(`❌ Lỗi: Job không có IP máy in.`);
+          await updateStatus(job.id, "error");
           continue;
         }
-        // -----------------------------
 
-        // Bước 1: Render
+        // --- [MỚI] KIỂM TRA KẾT NỐI TRƯỚC ---
+        try {
+          // console.log(`📡 Đang kiểm tra kết nối...`);
+          await checkPrinterConnection(printerIP, printerPort);
+          console.log(`✅ Kết nối OK. Bắt đầu xử lý...`);
+        } catch (connErr) {
+          console.log(`⚠️ KHÔNG KẾT NỐI ĐƯỢC MÁY IN (${printerIP}).`);
+          console.log(`↩️ Trả job #${job.id} về trạng thái 'pending'.`);
+
+          // Trả trạng thái về pending để lần sau quét lại (hoặc để worker khác xử lý nếu có)
+          await updateStatus(job.id, "pending");
+
+          // Break loop hoặc continue tùy logic. Ở đây continue để xem có job khác không,
+          // nhưng thực tế getNextJob lấy LIMIT 1 nên nó sẽ lấy lại job cũ nếu không cẩn thận.
+          // Tốt nhất là break luôn lần quét này, đợi 5s sau quét lại.
+          break;
+        }
+        // -------------------------------------
+
+        // Bước 1: Render HTML
         const pngBuffer = await renderHTMLtoPNG(job.html);
         if (!pngBuffer) {
+          console.log("❌ Lỗi render ảnh.");
           await updateStatus(job.id, "error");
           continue;
         }
@@ -185,15 +251,17 @@ async function worker(triggeredBy = "interval") {
         // Bước 2: Xử lý ảnh & In
         try {
           const rasterData = await prepareRasterData(pngBuffer);
-          // Truyền IP/Port lấy từ job vào hàm in
           await printRaw(printerIP, printerPort, rasterData);
           await updateStatus(job.id, "done");
-          console.log(`✅ Job #${job.id}: Hoàn thành\n`);
+          console.log(`🎉 Job #${job.id}: Hoàn thành\n`);
         } catch (errPrint) {
-          console.log(`❌ Lỗi in (Job #${job.id}):`, errPrint.message);
-          // Tùy chọn: Có thể set status là 'pending' để thử lại sau, hoặc 'error' để bỏ qua
+          console.log(
+            `❌ Lỗi trong quá trình in (Job #${job.id}):`,
+            errPrint.message
+          );
+          // Nếu in lỗi (ví dụ đang in thì mất mạng), set về error hoặc pending tùy bạn
           await updateStatus(job.id, "error");
-          break; // Break để chờ một chút trước khi thử lại vòng lặp
+          break;
         }
       }
     } while (hasPendingRun);
@@ -208,8 +276,6 @@ async function worker(triggeredBy = "interval") {
    7. START
 ============================================================ */
 (async () => {
-  console.log("🚀 Print Server (Smart Routing Version) đang chạy...");
-
   const pusher = new Pusher(PUSHER_APP_KEY, { cluster: PUSHER_CLUSTER });
 
   pusher.connection.bind("connected", () =>
@@ -219,10 +285,12 @@ async function worker(triggeredBy = "interval") {
     console.log("❌ PUSHER Error:", err)
   );
 
-  const channel = pusher.subscribe("print_channel");
+  const channelName = `print_channel_${BRANCH_ID}`;
+  const channel = pusher.subscribe(channelName);
+
+  console.log(`📡 Đang lắng nghe kênh: ${channelName}`);
+
   channel.bind("new_print_job", function (data) {
-    // Data trả về từ Pusher bây giờ cũng có thể chứa target ip nếu cần dùng ngay
-    // console.log(`⚡ Pusher Event: Job ID ${data.id}`, data.target);
     console.log(`⚡ Pusher Event: Job ID ${data.id}`);
     setTimeout(() => worker("pusher"), 500);
   });
